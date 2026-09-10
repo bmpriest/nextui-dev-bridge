@@ -1,0 +1,72 @@
+#!/bin/sh
+
+# Resolved absolutely: invoked as ./bin/service-on, a relative dirname walk
+# yields PAK_NAME="." and scatters state files at the wrong level.
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+PAK_NAME=$(basename "$PAK_DIR")
+PAK_NAME="${PAK_NAME%.pak}"
+
+: "${SDCARD_PATH:=/mnt/SDCARD}"
+: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
+: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
+: "${LOGS_PATH:=$USERDATA_PATH/logs}"
+
+STATE="$USERDATA_PATH/$PAK_NAME"
+LOG="$LOGS_PATH/$PAK_NAME.service.txt"
+PID_FILE="$STATE/dropbear.pid"
+BEACON_PID_FILE="$STATE/beacon.pid"
+PASSWD_MARKER="$STATE/passwd-mounted"
+PORT_FILE="$STATE/ssh-port"
+INPUT_PID_FILE="$STATE/input.pid"
+INPUT_SOCKET="/tmp/DevBridge-input.sock"
+
+mkdir -p "$STATE" "$LOGS_PATH" 2>/dev/null
+export PAK_DIR
+. "$BIN_DIR/devbridge.sh" || exit 1
+
+log() {
+	printf '%s %s\n' "$(date '+%H:%M:%S' 2>/dev/null)" "$*" >> "$LOG"
+}
+
+# Only ever signal a pid that still looks like the process we started; a
+# recycled pid belonging to something else must not be killed. `expect` is
+# matched against the command line, and an empty value skips the check.
+kill_tracked() {
+	file="$1"
+	expect="$2"
+	[ -f "$file" ] || return 0
+	pid=$(cat "$file" 2>/dev/null)
+	rm -f "$file"
+	case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+	[ -e "/proc/$pid" ] || return 0
+	if [ -n "$expect" ]; then
+		tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+			grep -qF "$expect" || return 0
+	fi
+	kill "$pid" 2>/dev/null
+}
+
+main() {
+	# Matched on this pak's own path: the aarch64 dropbear shares its binary
+	# name with the one the SSH Server pak runs, and killing that would drop
+	# somebody else's session.
+	kill_tracked "$BEACON_PID_FILE" "beacon.sh"
+	kill_tracked "$INPUT_PID_FILE" "devbridge-input"
+	kill_tracked "$PID_FILE" "$PAK_DIR/bin/"
+	rm -f "$INPUT_SOCKET"
+
+	# Unmount only a bind that is still present AND still ours by content. The
+	# marker alone is not enough: it outlives a reboot and any other pak's
+	# mount, so trusting it would unmount the SSH Server pak's passwd.
+	if [ -f "$PASSWD_MARKER" ] && passwd_is_ours; then
+		umount /etc/passwd 2>/dev/null
+	fi
+	rm -f "$PASSWD_MARKER"
+	rm -f "$PORT_FILE"
+
+	log "stopped"
+	return 0
+}
+
+main "$@"

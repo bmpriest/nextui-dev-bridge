@@ -1,0 +1,229 @@
+#!/bin/sh
+
+# Device-side DevBridge protocol endpoint. The host invokes one typed command
+# per SSH request; stdout is deliberately line-oriented and stable so clients
+# do not have to scrape the graphical UI.
+
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+: "${SDCARD_PATH:=/mnt/SDCARD}"
+: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
+: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
+: "${SHARED_USERDATA_PATH:=$SDCARD_PATH/.userdata/shared}"
+
+REQUEST_FILE=${DEVBRIDGE_REQUEST_FILE:-/tmp/DevBridge-request}
+
+fail() {
+	printf 'error=%s\n' "$*" >&2
+	exit 1
+}
+
+shell_quote() {
+	printf "'"
+	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+	printf "'"
+}
+
+queue_request() {
+	tmp="${REQUEST_FILE}.$$"
+	printf '%s\n' "$1" > "$tmp" || fail "cannot write launch request"
+	chmod 600 "$tmp" 2>/dev/null || true
+	mv "$tmp" "$REQUEST_FILE" || fail "cannot publish launch request"
+	printf 'ok=queued\n'
+}
+
+foreground() {
+	if [ -n "${DEVBRIDGE_FOREGROUND:-}" ]; then
+		printf '%s\n' "$DEVBRIDGE_FOREGROUND"
+		return
+	fi
+	if pidof minarch.elf >/dev/null 2>&1; then printf 'game\n'
+	elif pidof drastic >/dev/null 2>&1; then printf 'game\n'
+	elif pidof minui-list >/dev/null 2>&1 && [ -f /tmp/DevBridge-menu.json ]; then printf 'devbridge\n'
+	elif pidof nextui.elf >/dev/null 2>&1; then printf 'nextui\n'
+	else printf 'unknown\n'; fi
+}
+
+list_paks() {
+	kind=$1
+	case "$kind" in
+		tools) root="$SDCARD_PATH/Tools/$PLATFORM" ;;
+		emus) root="$SDCARD_PATH/Emus/$PLATFORM" ;;
+		*) fail "unknown pak kind" ;;
+	esac
+	for pak in "$root"/*.pak; do
+		[ -d "$pak" ] || continue
+		[ -x "$pak/launch.sh" ] || [ -f "$pak/launch.sh" ] || continue
+		name=$(basename "$pak")
+		printf '%s\t%s\n' "${name%.pak}" "$pak"
+	done
+}
+
+list_roms() {
+	wanted=${1:-}
+	for system_dir in "$SDCARD_PATH"/Roms/*; do
+		[ -d "$system_dir" ] || continue
+		tag=$(basename "$system_dir" | sed -n 's/.*(\([^()]\{1,16\}\))$/\1/p')
+		[ -n "$tag" ] || continue
+		[ -z "$wanted" ] || [ "$tag" = "$wanted" ] || continue
+		find "$system_dir" -type f 2>/dev/null | while IFS= read -r rom; do
+			relative=${rom#"$SDCARD_PATH/Roms/"}
+			printf '%s\t%s\n' "$tag" "$relative"
+		done
+	done
+}
+
+resolve_game() {
+	GAME_TAG=$1
+	GAME_ROM=$2
+	case "$GAME_TAG" in ''|*[!A-Za-z0-9_-]*) fail "invalid emulator tag" ;; esac
+	case "$GAME_ROM" in
+		*://*) GAME_ROM=${GAME_ROM#*://} ;;
+	esac
+	case "$GAME_ROM" in
+		"$SDCARD_PATH/Roms/"*) : ;;
+		/Roms/*) GAME_ROM="$SDCARD_PATH$GAME_ROM" ;;
+		*) GAME_ROM="$SDCARD_PATH/Roms/$GAME_ROM" ;;
+	esac
+	[ -f "$GAME_ROM" ] || fail "ROM not found: $GAME_ROM"
+	GAME_LAUNCHER="$SDCARD_PATH/Emus/$PLATFORM/$GAME_TAG.pak/launch.sh"
+	if [ ! -f "$GAME_LAUNCHER" ]; then
+		GAME_LAUNCHER="$SDCARD_PATH/.system/$PLATFORM/paks/Emus/$GAME_TAG.pak/launch.sh"
+	fi
+	[ -f "$GAME_LAUNCHER" ] || fail "emulator not found: $GAME_TAG"
+	core_launcher="$SDCARD_PATH/.system/$PLATFORM/paks/Emus/$GAME_TAG.pak/launch.sh"
+	[ -f "$core_launcher" ] || core_launcher=$GAME_LAUNCHER
+	GAME_CORE=$(sed -n 's/^[[:space:]]*EMU_EXE=//p' "$core_launcher" | head -1 | tr -d "\"'")
+	# Standalone emulators such as Advanced DraStic have no MinArch EMU_EXE.
+	# They are valid OPEN_GAME targets; only MinArch-specific state discovery
+	# requires a resolved core name.
+	GAME_STATES_DIR=
+	[ -z "$GAME_CORE" ] || GAME_STATES_DIR="$SHARED_USERDATA_PATH/$GAME_TAG-$GAME_CORE"
+	GAME_NAME=$(basename "$GAME_ROM")
+	case "$GAME_NAME" in *.*) GAME_STEM=${GAME_NAME%.*} ;; *) GAME_STEM=$GAME_NAME ;; esac
+}
+
+list_savestates() {
+	resolve_game "$1" "$2"
+	[ -n "$GAME_CORE" ] || fail "cannot determine active core for $GAME_TAG"
+	[ -d "$GAME_STATES_DIR" ] || return 0
+	for state in "$GAME_STATES_DIR/$GAME_NAME".st[0-9] \
+		"$GAME_STATES_DIR/$GAME_STEM".state \
+		"$GAME_STATES_DIR/$GAME_STEM".state[0-9] \
+		"$GAME_STATES_DIR/$GAME_STEM".state.[0-9] \
+		"$GAME_STATES_DIR/$GAME_STEM".state.auto; do
+		[ -f "$state" ] || continue
+		suffix=${state#"$GAME_STATES_DIR/$GAME_NAME"}
+		case "$suffix" in
+			.st[0-9]) slot=${suffix#.st} ;;
+			*)
+				suffix=${state#"$GAME_STATES_DIR/$GAME_STEM"}
+				case "$suffix" in
+					.state) slot=0 ;;
+					.state[0-9]) slot=${suffix#.state} ;;
+					.state.[0-9]) slot=${suffix#.state.} ;;
+					.state.auto) slot=9 ;;
+					*) continue ;;
+				esac
+				;;
+		esac
+		bytes=$(wc -c < "$state" 2>/dev/null | tr -d ' ')
+		modified=$(date -r "$state" +%s 2>/dev/null)
+		printf '%s\t%s\t%s\t%s\n' "$slot" "$state" "${bytes:-0}" "${modified:-0}"
+	done
+}
+
+open_game() {
+	tag=$1
+	rom=$2
+	state_slot=${3:-}
+	resolve_game "$tag" "$rom"
+	if [ -n "$state_slot" ]; then
+		[ "$state_slot" = auto ] && state_slot=9
+		case "$state_slot" in [0-9]) ;; *) fail "invalid save-state slot: $state_slot" ;; esac
+		state_path=$(list_savestates "$tag" "$rom" | awk -F '\t' -v wanted="$state_slot" '$1 == wanted {print $2; exit}')
+		[ -n "$state_path" ] || fail "save state slot $state_slot not found for $rom"
+	fi
+	[ "$(foreground)" = devbridge ] || fail "open DevBridge on the device before launching"
+	command="$(shell_quote "$BIN_DIR/game-launch")"
+	[ -z "$state_slot" ] || command="$command --state $(shell_quote "$state_slot")"
+	command="$command $(shell_quote "$GAME_LAUNCHER") $(shell_quote "$GAME_ROM")"
+	queue_request "$command"
+}
+
+open_pak() {
+	requested=$1
+	case "$requested" in
+		/*) pak=$requested ;;
+		*.pak) pak="$SDCARD_PATH/Tools/$PLATFORM/$requested" ;;
+		*) pak="$SDCARD_PATH/Tools/$PLATFORM/$requested.pak" ;;
+	esac
+	[ -d "$pak" ] && [ -f "$pak/launch.sh" ] || fail "pak not found: $requested"
+	[ "$(foreground)" = devbridge ] || fail "open DevBridge on the device before launching"
+	command="$(shell_quote "$BIN_DIR/game-launch") $(shell_quote "$pak/launch.sh")"
+	queue_request "$command"
+}
+
+screen_capture() {
+	mode=$(cat /sys/class/graphics/fb0/modes 2>/dev/null | head -1)
+	width=$(printf '%s' "$mode" | sed -n 's/[^0-9]*\([0-9][0-9]*\)x.*/\1/p')
+	height=$(printf '%s' "$mode" | sed -n 's/[^0-9]*[0-9][0-9]*x\([0-9][0-9]*\).*/\1/p')
+	[ -n "$width" ] || width=$(cut -d, -f1 /sys/class/graphics/fb0/virtual_size)
+	[ -n "$height" ] || fail "cannot determine visible framebuffer height"
+	stride=$(cat /sys/class/graphics/fb0/stride 2>/dev/null)
+	yoffset=$(cut -d, -f2 /sys/class/graphics/fb0/pan 2>/dev/null)
+	[ -n "$stride" ] && [ -n "$yoffset" ] || fail "missing framebuffer metadata"
+	case "$stride:$yoffset" in *[!0-9:]*) fail "invalid framebuffer metadata" ;; esac
+	path="/tmp/DevBridge-screen-$$.bgra"
+	dd if=/dev/fb0 of="$path" bs="$stride" skip="$yoffset" count="$height" 2>/dev/null ||
+		fail "framebuffer capture failed"
+	printf 'path=%s\nwidth=%s\nheight=%s\nstride=%s\nformat=bgra\n' \
+		"$path" "$width" "$height" "$stride"
+}
+
+perf_sample() {
+	printf 'timestamp=%s\n' "$(date +%s 2>/dev/null)"
+	printf 'foreground=%s\n' "$(foreground)"
+	printf 'loadavg=%s\n' "$(cat /proc/loadavg 2>/dev/null)"
+	printf 'mem_available_kb=%s\n' "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)"
+	printf 'cpu_khz=%s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)"
+	temp=$(cat /sys/devices/virtual/thermal/thermal_zone0/temp 2>/dev/null)
+	printf 'cpu_temp_millideg=%s\n' "$temp"
+	pid=$(pidof minarch.elf 2>/dev/null | awk '{print $1}')
+	[ -n "$pid" ] || pid=$(pidof drastic 2>/dev/null | awk '{print $1}')
+	printf 'game_pid=%s\n' "$pid"
+	if [ -n "$pid" ]; then
+		set -- $(cat "/proc/$pid/stat" 2>/dev/null)
+		printf 'game_utime_ticks=%s\ngame_stime_ticks=%s\n' "${14:-}" "${15:-}"
+		printf 'game_rss_kb=%s\n' "$(awk '/VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null)"
+	fi
+}
+
+command=$(printf '%s' "${1:-hello}" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
+[ $# -eq 0 ] || shift
+case "$command" in
+	hello)
+		printf 'DEVBRIDGE/1\nprotocol=1\nplatform=%s\ninput=%s\n' \
+			"$PLATFORM" "$([ -S /tmp/DevBridge-input.sock ] && echo yes || echo no)"
+		;;
+	status)
+		printf 'platform=%s\nforeground=%s\ninput=%s\nrequest=%s\n' \
+			"$PLATFORM" "$(foreground)" \
+			"$([ -S /tmp/DevBridge-input.sock ] && echo ready || echo unavailable)" \
+			"$([ -f "$REQUEST_FILE" ] && echo pending || echo none)"
+		;;
+	buttons) printf '%s\n' 'up down left right a b x y l1 r1 l2 r2 l3 r3 select start menu' ;;
+	paks) list_paks tools ;;
+	emus) list_paks emus ;;
+	roms) list_roms "${1:-}" ;;
+	savestates) [ $# -eq 2 ] || fail "usage: savestates TAG ROM"; list_savestates "$1" "$2" ;;
+	input) exec "$BIN_DIR/input" "$@" ;;
+	open-game) [ $# -eq 2 ] || fail "usage: open-game TAG ROM"; open_game "$1" "$2" ;;
+	open-game-state) [ $# -eq 3 ] || fail "usage: open-game-state TAG ROM SLOT"; open_game "$1" "$2" "$3" ;;
+	open-pak) [ $# -eq 1 ] || fail "usage: open-pak NAME_OR_PATH"; open_pak "$1" ;;
+	screen) screen_capture ;;
+	perf) perf_sample ;;
+	keep-screen-on) touch /tmp/stay_awake; printf 'ok=devbridge-ui-holds-autosleep\n' ;;
+	terminal) [ $# -gt 0 ] || fail "usage: terminal COMMAND"; exec /bin/sh -c "$*" ;;
+	*) fail "unknown command: $command" ;;
+esac

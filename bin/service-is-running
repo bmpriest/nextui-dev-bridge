@@ -1,0 +1,20 @@
+#!/bin/sh
+
+# Resolved absolutely: invoked as ./bin/service-on, a relative dirname walk
+# yields PAK_NAME="." and scatters state files at the wrong level.
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+PAK_NAME=$(basename "$PAK_DIR")
+PAK_NAME="${PAK_NAME%.pak}"
+
+: "${SDCARD_PATH:=/mnt/SDCARD}"
+: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
+: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
+
+export PAK_DIR
+export DEVBRIDGE_STATE="$USERDATA_PATH/$PAK_NAME"
+. "$BIN_DIR/devbridge.sh" || exit 1
+
+# A system-managed endpoint counts as available, but ownership remains
+# distinct so service-off never signals it.
+ssh_service_running

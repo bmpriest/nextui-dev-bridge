@@ -1,0 +1,11 @@
+#!/bin/sh
+
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if uname -m 2>/dev/null | grep -q 64; then
+	ARCH_DIR=arm64
+else
+	ARCH_DIR=arm
+fi
+
+exec "$BIN_DIR/$ARCH_DIR/devbridge-input" "$@"

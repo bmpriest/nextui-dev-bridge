@@ -1,0 +1,57 @@
+#!/bin/sh
+
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+PAK_NAME=$(basename "$PAK_DIR")
+PAK_NAME=${PAK_NAME%.pak}
+
+: "${SDCARD_PATH:=/mnt/SDCARD}"
+: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
+: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
+: "${LOGS_PATH:=$USERDATA_PATH/logs}"
+
+STATE="$USERDATA_PATH/$PAK_NAME"
+LOG="$LOGS_PATH/$PAK_NAME.service.txt"
+PID_FILE="$STATE/input.pid"
+INPUT_SOCKET=${DEVBRIDGE_INPUT_SOCKET:-/tmp/DevBridge-input.sock}
+
+mkdir -p "$STATE" "$LOGS_PATH"
+export PAK_DIR
+. "$BIN_DIR/devbridge.sh" || exit 1
+
+input_bin=$(arch_bin devbridge-input)
+[ -f "$input_bin" ] && [ -c /dev/uinput ] || exit 0
+chmod +x "$input_bin" 2>/dev/null || exit 0
+
+if [ -f "$PID_FILE" ]; then
+	input_pid=$(cat "$PID_FILE" 2>/dev/null)
+	case "$input_pid" in ''|*[!0-9]*) input_pid= ;; esac
+	if [ -n "$input_pid" ] && [ -e "/proc/$input_pid" ] &&
+		tr '\0' ' ' < "/proc/$input_pid/cmdline" 2>/dev/null | grep -qF "$input_bin"; then
+		[ -S "$INPUT_SOCKET" ] && exit 0
+		kill "$input_pid" 2>/dev/null || true
+		waited=0
+		while [ -e "/proc/$input_pid" ] && [ "$waited" -lt 20 ]; do
+			sleep 0.1
+			waited=$((waited + 1))
+		done
+	fi
+	rm -f "$PID_FILE"
+fi
+
+rm -f "$INPUT_SOCKET"
+"$input_bin" --daemon "$INPUT_SOCKET" >> "$LOG" 2>&1 &
+input_pid=$!
+printf '%s\n' "$input_pid" > "$PID_FILE"
+sleep 1
+
+if [ -S "$INPUT_SOCKET" ] && kill -0 "$input_pid" 2>/dev/null; then
+	printf '%s virtual controller started as pid %s\n' \
+		"$(date '+%H:%M:%S' 2>/dev/null)" "$input_pid" >> "$LOG"
+	exit 0
+fi
+
+rm -f "$PID_FILE" "$INPUT_SOCKET"
+printf '%s virtual controller unavailable\n' \
+	"$(date '+%H:%M:%S' 2>/dev/null)" >> "$LOG"
+exit 0

@@ -1,0 +1,16 @@
+#!/bin/sh
+
+BIN_DIR="$(dirname "$0")"
+
+# auto.sh runs before Wi-Fi has necessarily associated. Wait for an address
+# rather than starting dropbear against a interface with no IP.
+. "$BIN_DIR/devbridge.sh" 2>/dev/null || true
+
+attempts=0
+while [ "$attempts" -lt 30 ]; do
+	ip_address >/dev/null 2>&1 && break
+	attempts=$((attempts + 1))
+	sleep 2
+done
+
+exec "$BIN_DIR/service-on"

@@ -1,0 +1,148 @@
+#!/bin/sh
+
+# Resolved absolutely: invoked as ./bin/service-on, a relative dirname walk
+# yields PAK_NAME="." and scatters state files at the wrong level.
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+PAK_NAME=$(basename "$PAK_DIR")
+PAK_NAME="${PAK_NAME%.pak}"
+
+: "${SDCARD_PATH:=/mnt/SDCARD}"
+: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
+: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
+: "${LOGS_PATH:=$USERDATA_PATH/logs}"
+
+STATE="$USERDATA_PATH/$PAK_NAME"
+LOG="$LOGS_PATH/$PAK_NAME.service.txt"
+PID_FILE="$STATE/dropbear.pid"
+PASSWD_MARKER="$STATE/passwd-mounted"
+HOST_KEY="$STATE/dropbear_ed25519_host_key"
+PORT_FILE="$STATE/ssh-port"
+
+mkdir -p "$STATE" "$LOGS_PATH"
+
+export PAK_DIR
+export DEVBRIDGE_STATE="$STATE"
+. "$BIN_DIR/devbridge.sh" || exit 1
+
+log() {
+	printf '%s %s\n' "$(date '+%H:%M:%S' 2>/dev/null)" "$*" >> "$LOG"
+}
+
+main() {
+	if [ -f "$PID_FILE" ]; then
+		pid=$(cat "$PID_FILE" 2>/dev/null)
+		if bundled_ssh_running; then
+			"$BIN_DIR/input-on"
+			log "already running as pid $pid"
+			return 0
+		fi
+		rm -f "$PID_FILE"
+	fi
+
+	selected_port=$SSH_PORT
+	using_system_accounts=0
+	if ssh_port_is_listening "$SSH_PORT"; then
+		if system_sftp_available; then
+			"$BIN_DIR/input-on"
+			rm -f "$PORT_FILE"
+			log "using existing system SSH/SFTP on port $SSH_PORT"
+			if [ -f "$STATE/beacon-enabled" ] && [ ! -f "$STATE/beacon.pid" ]; then
+				"$BIN_DIR/beacon.sh" >> "$LOG" 2>&1 &
+				log "discovery beacon started"
+			fi
+			return 0
+		fi
+		selected_port=$SSH_FALLBACK_PORT
+		using_system_accounts=1
+		if ssh_port_is_listening "$selected_port"; then
+			log "system SSH on port $SSH_PORT has no usable SFTP and fallback port $selected_port is occupied"
+			return 1
+		fi
+		log "system SSH on port $SSH_PORT has no usable SFTP; using bundled SSH/SFTP on port $selected_port"
+	fi
+	rm -f "$PORT_FILE"
+
+	arch=$(arch_dir)
+	chmod +x "$BIN_DIR/$arch"/* "$BIN_DIR/shell-wrapper.sh" \
+		"$BIN_DIR/beacon.sh" 2>/dev/null
+
+	dropbear=$(dropbear_command) || {
+		log "no dropbear binary for $arch"
+		return 1
+	}
+
+	# Provide a development-only account without modifying the firmware file.
+	#
+	# The mount state is read from /proc/mounts rather than trusted from the
+	# marker file: the marker lives on the SD card and survives a reboot, but
+	# the bind mount does not, so trusting it alone would skip the mount after
+	# every reboot and leave logins failing against the firmware's passwd.
+	# The marker records only that the mount is *ours*, so service-off never
+	# unmounts one that another pak established.
+	if [ "$using_system_accounts" = 1 ]; then
+		# A firmware SSH server is live on port 22. Rebinding passwd would alter
+		# authentication for that service too, violating provider ownership.
+		log "using system accounts for the port-$selected_port fallback"
+		rm -f "$PASSWD_MARKER"
+	elif passwd_is_ours; then
+		touch "$PASSWD_MARKER"
+	elif passwd_is_bound; then
+		# Another pak owns the bind. Stacking ours on top would leave their
+		# service reading our file once we unmount, so leave it alone and say
+		# so; logins will use whatever accounts that file provides.
+		log "/etc/passwd is bound by another pak; leaving it in place"
+		rm -f "$PASSWD_MARKER"
+	else
+		if mount -o bind "$PAK_DIR/res/passwd" /etc/passwd 2>> "$LOG"; then
+			touch "$PASSWD_MARKER"
+		else
+			log "could not bind the passwd file"
+			return 1
+		fi
+	fi
+
+	# Host key handling differs by build. -R does NOT create the file named by
+	# -r (verified on the A30: dropbear started, generated nothing, and closed
+	# every connection), so the multi-call build generates the key up front
+	# with dropbearkey and keeps it on the card. The single-binary aarch64
+	# build has no dropbearkey, so it falls back to -R writing into the
+	# compiled-in default directory, which has to exist first.
+	multi=$(arch_bin dropbearmulti)
+	if [ -x "$multi" ]; then
+		if [ ! -f "$HOST_KEY" ]; then
+			log "generating host key"
+			"$multi" dropbearkey -t ed25519 -f "$HOST_KEY" >> "$LOG" 2>&1 || {
+				log "host key generation failed"
+				return 1
+			}
+		fi
+		key_args="-r $HOST_KEY"
+	else
+		mkdir -p /etc/dropbear 2>/dev/null
+		key_args="-R"
+	fi
+
+	# shellcheck disable=SC2086 # both are command lines, not single words
+	$dropbear $key_args -p "$selected_port" -P "$PID_FILE" \
+		-c "$BIN_DIR/shell-wrapper.sh" >> "$LOG" 2>&1
+
+	sleep 1
+	if [ ! -f "$PID_FILE" ]; then
+		log "dropbear failed to start"
+		return 1
+	fi
+
+	printf '%s\n' "$selected_port" > "$PORT_FILE"
+	log "dropbear started on port $selected_port (pid $(cat "$PID_FILE" 2>/dev/null))"
+	"$BIN_DIR/input-on"
+
+	if [ -f "$STATE/beacon-enabled" ]; then
+		"$BIN_DIR/beacon.sh" >> "$LOG" 2>&1 &
+		log "discovery beacon started"
+	fi
+
+	return 0
+}
+
+main "$@"

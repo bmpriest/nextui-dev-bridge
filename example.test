@@ -1,0 +1,103 @@
+# DevBridge 0.7.0 .test reference
+#
+# Run from the DevBridge.pak source directory with one or more connections:
+#   python3 tools/devbridge.py --connect 192.168.0.144:brick run example.test
+#   python3 tools/devbridge.py --adb SERIAL=brick run example.test
+#
+# This file is intentionally comments-only. Copy a recipe below, remove its
+# leading `# ` markers, and adjust the device, ROM, and state slot.
+
+# Session and connections
+# SESSION <name> [output_root]       // {date}, {time}, and strftime fields work in name
+# DISCOVER [timeout_seconds]         // listens for DevBridge LAN beacons
+# CONNECT <ip_address> [alias]       // SSH/SCP connection
+# CONNECT_ADB <serial> [alias]       // adb shell/adb pull connection
+# ALIAS <old_alias> <new_alias>
+# ALIAS_CMD <name> <command...>
+# STATUS
+#
+# CLI connections occur before commands in this file. SSH and ADB devices may
+# coexist. Prefix commands with `alias:` or `all:` when multiple devices are
+# connected. An unprefixed device command requires exactly one connection.
+
+# Inventory and terminal access
+# GET_BTNS
+# GET_PAKS
+# GET_EMUS
+# GET_ROM_LIST
+# GET_ROM_BY_SYSTEM <tag>
+# GET_ROM_SAVESTATES <tag> <rom>
+# TRM <command...>                    // root-equivalent escape hatch
+# KEEP_SCREEN_ON                      // reliable while DevBridge UI is foreground
+#
+# ROM inventory rows are: TAG<TAB>path-relative-to-Roms.
+# Save-state rows are: SLOT<TAB>absolute_path<TAB>bytes<TAB>modified_epoch.
+# Slot 9 is MinArch's hidden/automatic resume slot; `auto` is accepted when
+# launching it.
+
+# Controller input
+# BTN <button>                        // 80 ms tap
+# BTN HOLD <button-or-chord> <ms>
+# BTN PRESS <button-or-chord>
+# BTN RELEASE <button-or-chord>
+# BTN REPEAT <button-or-chord> DURATION <ms> FREQUENCY <ms>
+# BTN STOP                            // releases every held button
+#
+# Chords use commas, for example: BTN HOLD L1,R1 500
+# Buttons: up down left right a b x y l1 r1 l2 r2 l3 r3 select start menu
+# Repeats are always finite. With no options, REPEAT lasts 500 ms at 500 ms.
+
+# Launch lifecycle
+# OPEN_GAME <tag> <rom>
+# OPEN_GAME_STATE <tag> <rom> <slot>
+# OPEN_RANDOM_GAME <tag>
+# OPEN_PAK <name-or-path>
+# QUIT_GAME                           // MinArch standard five-row menu adapter
+# WAIT_FOR <foreground> [timeout_ms]  // normally game, devbridge, or nextui
+#
+# OPEN_GAME_STATE verifies that the state belongs to the ROM and active core,
+# then uses MinArch's normal /tmp/resume_slot.txt startup mechanism.
+
+# Observation
+# SCREEN [label]
+# PERF [duration_ms] [interval_ms]
+# WAIT <milliseconds>
+#
+# SCREEN captures the visible framebuffer page. PERF is functional telemetry,
+# not a calibrated low-overhead benchmark: it performs remote /proc/sysfs
+# polling. Do not use current PERF results for small performance comparisons.
+
+# Commands planned but NOT implemented in 0.7.0 include PUSH, DEPLOY_PAK,
+# ASSERT, transactional CONFIG commands, FINALLY, buffered PERF_START/STOP,
+# true multi-device barriers, and READ_MENU. See PROTOCOL.md for the roadmap.
+
+# Complete SSH lifecycle example
+# SESSION tetris-{date}-{time} devbridge-sessions
+# STATUS
+# GET_ROM_BY_SYSTEM GB
+# OPEN_GAME GB "Game Boy (GB)/Tetris (World) (Rev 1).zip"
+# WAIT_FOR game 30000
+# WAIT 1500
+# SCREEN tetris-running
+# PERF 3000 1000
+# QUIT_GAME
+# SCREEN devbridge-returned
+# STATUS
+
+# Save-state launch example
+# SESSION state-{date}-{time} devbridge-sessions
+# GET_ROM_SAVESTATES GBC "Game Boy Color (GBC)/Tetris DX (World) (SGB Enhanced) (GB Compatible).zip"
+# OPEN_GAME_STATE GBC "Game Boy Color (GBC)/Tetris DX (World) (SGB Enhanced) (GB Compatible).zip" 9
+# WAIT_FOR game 30000
+# WAIT 1500
+# SCREEN loaded-state-9
+# QUIT_GAME
+# SCREEN devbridge-returned
+
+# Mixed transport example (normally connect these in the CLI or REPL)
+# SESSION two-bricks-{date}-{time} devbridge-sessions
+# CONNECT 192.168.0.144 wifi
+# CONNECT_ADB BRICK_SERIAL usb
+# all:STATUS
+# wifi:GET_ROM_BY_SYSTEM GB
+# usb:GET_ROM_BY_SYSTEM GBC

@@ -1,0 +1,15 @@
+{
+  "name": "DevBridge",
+  "type": "TOOL",
+  "description": "SSH/SFTP access, discovery, and automated remote testing",
+  "author": "bmpriest",
+  "repo_url": "none",
+  "release_filename": "DevBridge.pak.zip",
+  "platforms": [
+    "my282",
+    "tg5040",
+    "my285"
+  ],
+  "launch": "launch.sh",
+  "version": "0.7.0"
+}
