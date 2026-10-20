@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import gzip
 import json
 import os
 from pathlib import Path
@@ -52,10 +53,19 @@ def verify_options(extras):
         if key == "threshold":
             options["threshold"] = float(value)
         elif key == "region":
-            parts = [int(piece) for piece in value.split(",")]
-            if len(parts) != 4:
+            # Integers are pixels. Values written with a decimal point are
+            # fractions of the screen, so one check can crop the same part of
+            # the picture on devices with different resolutions.
+            pieces = [piece.strip() for piece in value.split(",")]
+            if len(pieces) != 4:
                 raise ProtocolError("VERIFY: region must be X,Y,W,H")
-            options["region"] = tuple(parts)
+            if any("." in piece for piece in pieces):
+                parts = tuple(float(piece) for piece in pieces)
+                if not all(0.0 <= part <= 1.0 for part in parts):
+                    raise ProtocolError("VERIFY: fractional region values must be 0-1")
+            else:
+                parts = tuple(int(piece) for piece in pieces)
+            options["region"] = parts
         else:
             raise ProtocolError(f"VERIFY: unknown option {key!r}")
     return options
@@ -274,12 +284,36 @@ class Runner:
         )
         return result
 
+    def locate_platform(self, device: Device):
+        """Find the platform directory this device's DevBridge is installed in.
+
+        One SD card can carry several platforms' Tools, and a mixed pair needs
+        a different directory per device, so a lone install wins; --platform
+        only breaks a tie (or is trusted outright when nothing is found).
+        """
+        listing = self.transport.run(
+            device,
+            "for p in /mnt/SDCARD/Tools/*/DevBridge.pak/bin/protocol; do "
+            "[ -f \"$p\" ] && echo \"$p\"; done",
+            check=False,
+        )
+        found = [line.split("/")[4] for line in listing.stdout.splitlines()
+                 if line.startswith("/mnt/SDCARD/Tools/")]
+        if len(found) == 1:
+            return found[0]
+        if self.args.platform in found or not found:
+            return self.args.platform
+        raise ProtocolError(
+            f"{device.alias}: DevBridge is installed for {', '.join(found)}; "
+            "pass --platform to choose one")
+
     def connect(self, address: str, alias: str | None = None, port: int | None = None):
         port = port or self.args.port
         alias = alias or address.replace(".", "-")
         if alias in self.devices:
             raise ProtocolError(f"alias already connected: {alias}")
         device = Device(address, alias, port, self.args.platform)
+        device.platform = self.locate_platform(device)
         result = self.protocol(device, "hello")
         if not has_protocol_marker(result.stdout):
             raise ProtocolError(f"{alias}: incompatible or missing DevBridge protocol")
@@ -293,6 +327,7 @@ class Runner:
         if alias in self.devices:
             raise ProtocolError(f"alias already connected: {alias}")
         device = Device(serial, alias, None, self.args.platform, transport="adb")
+        device.platform = self.locate_platform(device)
         result = self.protocol(device, "hello")
         if not has_protocol_marker(result.stdout):
             raise ProtocolError(f"{alias}: incompatible or missing DevBridge protocol over ADB")
@@ -468,6 +503,9 @@ class Runner:
         with Image.open(path) as image:
             if region:
                 x, y, width, height = region
+                if isinstance(x, float):
+                    x, width = round(x * image.width), round(width * image.width)
+                    y, height = round(y * image.height), round(height * image.height)
                 image = image.crop((x, y, x + width, y + height))
             return image.convert("L").resize((64, 48)).tobytes()
 
@@ -480,6 +518,28 @@ class Runner:
                 f"cannot compare {first.name} with {second.name}: different sizes")
         return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
 
+    def _download_screen(self, device, remote_path: str, local_raw: Path):
+        """Fetch a raw framebuffer dump, compressed on the device when it can be.
+
+        A raw frame is 1-3 MB of mostly repeated pixels and a few tens of KB
+        gzipped. Over a slow or shared radio - a guest reached through an ad hoc
+        host - the raw copy can stall past the operation timeout; the
+        compressed one does not. Devices without gzip get the raw copy."""
+        quoted = shlex.quote(remote_path)
+        packed = self.transport.run(
+            device, f"gzip -1 -c -- {quoted} > {quoted}.gz && echo packed", check=False)
+        if packed.returncode or "packed" not in packed.stdout:
+            self.transport.run(device, f"rm -f -- {quoted}.gz", check=False)
+            self.transport.download(device, remote_path, local_raw)
+            return
+        archive = local_raw.with_name(local_raw.name + ".gz")
+        try:
+            self.transport.download(device, remote_path + ".gz", archive)
+        finally:
+            self.transport.run(device, f"rm -f -- {quoted}.gz", check=False)
+        local_raw.write_bytes(gzip.decompress(archive.read_bytes()))
+        archive.unlink()
+
     def _capture_frame(self, device) -> Path:
         """Grab the current screen to a PNG for comparison, without recording it
         as one of the run's deliberate screenshots."""
@@ -489,7 +549,7 @@ class Runner:
             raise ProtocolError(f"{device.alias}: invalid screenshot path")
         self.command_number += 1
         raw = self.session_dir / f"verify-{self.command_number:04d}-{device.alias}.bgra"
-        self.transport.download(device, remote_path, raw)
+        self._download_screen(device, remote_path, raw)
         self.transport.run(device, f"rm -f -- {shlex.quote(remote_path)}")
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -577,7 +637,7 @@ class Runner:
             self.command_number += 1
             stem = label or f"screen-{self.command_number:04d}"
             raw = self.session_dir / f"{stem}-{device.alias}.bgra"
-            self.transport.download(device, remote_path, raw)
+            self._download_screen(device, remote_path, raw)
             self.transport.run(device, f"rm -f -- {shlex.quote(remote_path)}")
             output = raw
             if ffmpeg:
@@ -771,7 +831,8 @@ class Runner:
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--platform", default="tg5040")
+    result.add_argument("--platform", default="tg5040",
+                        help="platform directory when a card has DevBridge for several (default: tg5040)")
     result.add_argument("--user", default="root")
     result.add_argument("--port", type=int, default=22)
     result.add_argument("--identity", type=Path)

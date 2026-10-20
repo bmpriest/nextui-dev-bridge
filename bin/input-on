@@ -39,6 +39,12 @@ if [ -f "$PID_FILE" ]; then
 	rm -f "$PID_FILE"
 fi
 
+# NextUI's h700 platform reads raw evdev codes rather than TrimUI's SDL
+# layout, so the virtual pad has to speak ANBERNIC-keys' codes there.
+case "$PLATFORM" in
+	h700) export DEVBRIDGE_INPUT_LAYOUT=h700 ;;
+esac
+
 rm -f "$INPUT_SOCKET"
 "$input_bin" --daemon "$INPUT_SOCKET" >> "$LOG" 2>&1 &
 input_pid=$!

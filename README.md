@@ -1,7 +1,8 @@
 # DevBridge
 
 DevBridge is a development-access and automation tool for the Miyoo A30
-(`my282`), TrimUI Brick (`tg5040`), and Miyoo Mini Flip (`my285`). It adopts
+(`my282`), TrimUI Brick (`tg5040`), Miyoo Mini Flip (`my285`), and Anbernic
+H700 devices (`h700`). It adopts
 firmware SSH/SFTP when both are already available, otherwise supplies them
 from its bundled Dropbear and `gesftpserver`. It also provides typed remote
 commands, virtual controller input, game/save-state launch automation,
@@ -83,6 +84,23 @@ sftp://root@<address>
 ```
 
 `scp` also works, since the bundled `dropbearmulti` includes it.
+
+H700 Base OS runs its own Dropbear on port 22 with no config file. Its SFTP
+subsystem is the compiled-in `/usr/libexec/sftp-server`, which that firmware
+does ship, so DevBridge adopts it as `System SSH` rather than starting a second
+server.
+
+## Virtual controller on H700
+
+NextUI's h700 platform reads every `/dev/input/event*` node raw, using the
+ANBERNIC-keys codes (A=304, B=305, d-pad on `KEY_UP`..`KEY_RIGHT`), not the
+TrimUI SDL layout. On h700, `input-on` starts the virtual pad with
+`DEVBRIDGE_INPUT_LAYOUT=h700`, which reports exactly those codes and no axes.
+NextUI also opens every pad except the built-in one as an SDL joystick, and
+SDL numbers this device's buttons from `KEY_UP` upwards: as a joystick, Up is
+button 0, which h700's `JOY_*` table reads as A, so every Up also pressed A. The
+h700 virtual pad is therefore named `ANBERNIC-keys`, the one name NextUI-h700
+leaves to its evdev path.
 
 ## Discovery
 

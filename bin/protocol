@@ -40,6 +40,7 @@ foreground() {
 	if pidof minarch.elf >/dev/null 2>&1; then printf 'game\n'
 	elif pidof drastic >/dev/null 2>&1; then printf 'game\n'
 	elif pidof minui-list >/dev/null 2>&1 && [ -f /tmp/DevBridge-menu.json ]; then printf 'devbridge\n'
+	elif pidof netplay.elf >/dev/null 2>&1; then printf 'netplay\n'
 	elif pidof nextui.elf >/dev/null 2>&1; then printf 'nextui\n'
 	else printf 'unknown\n'; fi
 }

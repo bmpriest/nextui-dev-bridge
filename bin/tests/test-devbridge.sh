@@ -32,7 +32,16 @@ cat > "$FIXTURE/stub/netstat" <<STUB
 [ ! -f "$FIXTURE/stub/port-22-up" ] || echo 'tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN'
 [ ! -f "$FIXTURE/stub/port-2222-up" ] || echo 'tcp 0 0 0.0.0.0:2222 0.0.0.0:* LISTEN'
 STUB
-chmod +x "$FIXTURE/stub/ip" "$FIXTURE/stub/hostname" "$FIXTURE/stub/netstat"
+REAL_PIDOF=$(command -v pidof || echo false)
+cat > "$FIXTURE/stub/pidof" <<STUB
+#!/bin/sh
+case "\$1" in
+	dropbear|dropbearmulti) [ -f "$FIXTURE/stub/dropbear-up" ] ;;
+	*) exec "$REAL_PIDOF" "\$@" ;;
+esac
+STUB
+chmod +x "$FIXTURE/stub/ip" "$FIXTURE/stub/hostname" "$FIXTURE/stub/netstat" \
+	"$FIXTURE/stub/pidof"
 
 # A fake pak tree so the arch-resolving helpers can be exercised on the host.
 : > "$FIXTURE/stub/udp-log"
@@ -166,8 +175,22 @@ case "$payload" in *' sftp=yes') ;; *) exit 1 ;; esac
 sed -i "s#sftp-server#missing-sftp-server#" "$FIXTURE/ssh/sshd_config"
 expect_failure system_sftp_available
 expect_failure sftp_available
-rm -f "$FIXTURE/stub/port-22-up"
 unset SSHD_CONFIG_GLOB
+
+# Firmware Dropbear (H700 Base OS) has no sshd_config; its compiled-in SFTP
+# server is usable exactly when that file is executable.
+touch "$FIXTURE/stub/dropbear-up"
+DROPBEAR_SFTP_SERVER="$FIXTURE/ssh/dropbear-sftp-server"
+export DROPBEAR_SFTP_SERVER
+expect_failure system_sftp_available
+: > "$DROPBEAR_SFTP_SERVER"
+chmod +x "$DROPBEAR_SFTP_SERVER"
+system_sftp_available
+sftp_available
+rm -f "$FIXTURE/stub/dropbear-up"
+expect_failure system_sftp_available
+unset DROPBEAR_SFTP_SERVER
+rm -f "$FIXTURE/stub/port-22-up"
 
 # service-on adopts a complete system service without mounting passwd or
 # launching bundled Dropbear. If system SSH lacks SFTP, port 2222 is the safe
@@ -357,7 +380,7 @@ out=$(SSH_ORIGINAL_COMMAND="echo plain command" "$FIXTURE/wrapper/shell-wrapper.
 	[ "$LAST_SELECTED" = "$(jq -r '[.items[] | .name] | index("Start DevBridge")' "$menu")" ]
 )
 
-jq -e '.platforms == ["my282", "tg5040", "my285"]' "$DIR/pak.json" >/dev/null
+jq -e '.platforms == ["my282", "tg5040", "my285", "h700"]' "$DIR/pak.json" >/dev/null
 jq -e '.launch == "launch.sh"' "$DIR/pak.json" >/dev/null
 
 # Device protocol inventory and launch requests use stable line-oriented

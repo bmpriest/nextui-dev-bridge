@@ -131,7 +131,19 @@ openssh_sftp_target() {
 	return 1
 }
 
+# Firmware Dropbear (H700 Base OS) has no config file: its SFTP subsystem is
+# the compiled-in /usr/libexec/sftp-server, so it is usable exactly when that
+# file is executable.
+dropbear_sftp_target() {
+	pidof dropbear >/dev/null 2>&1 || pidof dropbearmulti >/dev/null 2>&1 ||
+		return 1
+	target=${DROPBEAR_SFTP_SERVER:-/usr/libexec/sftp-server}
+	[ -x "$target" ] || return 1
+	printf '%s\n' "$target"
+}
+
 system_sftp_available() {
+	dropbear_sftp_target >/dev/null 2>&1 && ! bundled_ssh_running && return 0
 	target=$(openssh_sftp_target 2>/dev/null) || return 1
 	case "$target" in
 		internal-sftp) return 0 ;;

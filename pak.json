@@ -8,7 +8,8 @@
   "platforms": [
     "my282",
     "tg5040",
-    "my285"
+    "my285",
+    "h700"
   ],
   "launch": "launch.sh",
   "version": "0.7.0"

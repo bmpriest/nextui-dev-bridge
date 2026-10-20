@@ -41,7 +41,7 @@ struct button {
  * BTN_NORTH/WEST become SDL buttons 0/1 and 2/3 respectively; NextUI's
  * tg5040 platform maps those indices to B/A and Y/X.
  */
-static struct button buttons[] = {
+static struct button trimui_buttons[] = {
 	{"b",      EV_KEY, BTN_SOUTH, 0},
 	{"a",      EV_KEY, BTN_EAST, 0},
 	{"y",      EV_KEY, BTN_NORTH, 0},
@@ -60,6 +60,51 @@ static struct button buttons[] = {
 	{"l2",     EV_ABS, ABS_Z, 0},
 	{"r2",     EV_ABS, ABS_RZ, 0},
 };
+
+/*
+ * Match ANBERNIC-keys on H700.  NextUI reads every evdev node raw and maps the
+ * CODE_* values in its h700 platform.h, so this pad reports those exact codes,
+ * with the d-pad as keys rather than a hat.  The device takes that pad's name
+ * too (see create_virtual_controller): NextUI also opens every other pad as an SDL
+ * joystick, where these codes land on the wrong JOY_* buttons.
+ */
+static struct button h700_buttons[] = {
+	{"a",      EV_KEY, 304, 0},
+	{"b",      EV_KEY, 305, 0},
+	{"y",      EV_KEY, 306, 0},
+	{"x",      EV_KEY, 307, 0},
+	{"l1",     EV_KEY, 308, 0},
+	{"r1",     EV_KEY, 309, 0},
+	{"select", EV_KEY, 310, 0},
+	{"start",  EV_KEY, 311, 0},
+	{"menu",   EV_KEY, 312, 0},
+	{"l3",     EV_KEY, 313, 0},
+	{"l2",     EV_KEY, 314, 0},
+	{"r2",     EV_KEY, 315, 0},
+	{"r3",     EV_KEY, 316, 0},
+	{"up",     EV_KEY, KEY_UP, 0},
+	{"down",   EV_KEY, KEY_DOWN, 0},
+	{"left",   EV_KEY, KEY_LEFT, 0},
+	{"right",  EV_KEY, KEY_RIGHT, 0},
+};
+
+static struct button *buttons = trimui_buttons;
+static size_t button_count = sizeof(trimui_buttons) / sizeof(trimui_buttons[0]);
+static bool layout_has_axes = true;
+
+static int select_layout(const char *name)
+{
+	if (!name || !*name || strcasecmp(name, "trimui") == 0)
+		return 0;
+	if (strcasecmp(name, "h700") == 0) {
+		buttons = h700_buttons;
+		button_count = sizeof(h700_buttons) / sizeof(h700_buttons[0]);
+		layout_has_axes = false;
+		return 0;
+	}
+	fprintf(stderr, "DevBridge input: unknown layout %s\n", name);
+	return -1;
+}
 
 static void stop_running(int signal_number)
 {
@@ -91,7 +136,7 @@ static int sync_events(void)
 static struct button *find_button(const char *name)
 {
 	size_t i;
-	for (i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i) {
+	for (i = 0; i < button_count; ++i) {
 		if (strcasecmp(buttons[i].name, name) == 0)
 			return &buttons[i];
 	}
@@ -130,15 +175,18 @@ static int release_all(void)
 {
 	size_t i;
 	int failed = 0;
-	for (i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i) {
+	for (i = 0; i < button_count; ++i) {
 		if (!buttons[i].value)
 			continue;
 		buttons[i].value = 0;
 		if (buttons[i].type == EV_KEY && emit(EV_KEY, buttons[i].code, 0))
 			failed = 1;
 	}
-	if (emit(EV_ABS, ABS_HAT0X, 0) || emit(EV_ABS, ABS_HAT0Y, 0) ||
-	    emit(EV_ABS, ABS_Z, 0) || emit(EV_ABS, ABS_RZ, 0) || sync_events())
+	if (layout_has_axes &&
+	    (emit(EV_ABS, ABS_HAT0X, 0) || emit(EV_ABS, ABS_HAT0Y, 0) ||
+	     emit(EV_ABS, ABS_Z, 0) || emit(EV_ABS, ABS_RZ, 0)))
+		failed = 1;
+	if (sync_events())
 		failed = 1;
 	return failed ? -1 : 0;
 }
@@ -155,6 +203,24 @@ static int create_virtual_controller(void)
 	uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
 	if (uinput_fd < 0)
 		return -1;
+	if (!layout_has_axes) {
+		if (ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY) < 0)
+			return -1;
+		for (i = 0; i < button_count; ++i)
+			if (ioctl(uinput_fd, UI_SET_KEYBIT, buttons[i].code) < 0)
+				return -1;
+		memset(&device, 0, sizeof(device));
+		/* NextUI-h700 reads its built-in pad through raw evdev and also opens
+		 * every other pad as an SDL joystick, skipping only this name. SDL
+		 * numbers this device's buttons from KEY_UP upwards, so as a joystick
+		 * Up would arrive a second time as button 0 - which is A there. */
+		strncpy(device.name, "ANBERNIC-keys", UINPUT_MAX_NAME_SIZE - 1);
+		device.id.bustype = BUS_VIRTUAL;
+		if (write(uinput_fd, &device, sizeof(device)) != sizeof(device) ||
+		    ioctl(uinput_fd, UI_DEV_CREATE) < 0)
+			return -1;
+		return 0;
+	}
 	if (ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY) < 0 ||
 	    ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS) < 0)
 		return -1;
@@ -370,6 +436,8 @@ int main(int argc, char **argv)
 	const char *configured = getenv("DEVBRIDGE_INPUT_SOCKET");
 	if (configured && *configured)
 		socket_path = configured;
+	if (select_layout(getenv("DEVBRIDGE_INPUT_LAYOUT")) < 0)
+		return 2;
 	if (argc >= 2 && strcmp(argv[1], "--daemon") == 0)
 		return run_daemon(argc >= 3 ? argv[2] : socket_path);
 	if (argc < 2) {
