@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fb.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
 #include <signal.h>
@@ -8,7 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -481,6 +486,167 @@ static int run_mirror(const char *src_path, const char *dst_path)
 	return 0;
 }
 
+/*
+ * Screen saver, for DevBridge's status screen, which can sit untouched for
+ * hours and was burning into an RG35XXH panel.
+ *
+ * --idle SECONDS: returns once no input device has reported anything for
+ * SECONDS. --saver [REQUEST_FILE]: turns the panel off and, in case a panel
+ * ignores that, paints the framebuffer black with one dot that moves every
+ * DOT_SECONDS; returns on any input or when REQUEST_FILE appears (a protocol
+ * launch is waiting), with the panel back at its previous brightness.
+ */
+#define MAX_INPUTS 16
+#define DOT_SECONDS 30
+#define DISP_LCD_SET_BRIGHTNESS 0x102
+#define DISP_LCD_GET_BRIGHTNESS 0x103
+
+static int open_inputs(struct pollfd *fds)
+{
+	int count = 0;
+	for (int i = 0; i < 32 && count < MAX_INPUTS; i++) {
+		char path[32];
+		snprintf(path, sizeof(path), "/dev/input/event%d", i);
+		int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		fds[count].fd = fd;
+		fds[count].events = POLLIN;
+		count++;
+	}
+	return count;
+}
+
+/* True if any device reported a real event (not just a sync). */
+static bool drain_inputs(struct pollfd *fds, int count)
+{
+	bool any = false;
+	for (int i = 0; i < count; i++) {
+		struct input_event event;
+		while (read(fds[i].fd, &event, sizeof(event)) == (ssize_t)sizeof(event))
+			if (event.type == EV_KEY || event.type == EV_ABS)
+				any = true;
+	}
+	return any;
+}
+
+static void close_inputs(struct pollfd *fds, int count)
+{
+	for (int i = 0; i < count; i++)
+		close(fds[i].fd);
+}
+
+static int run_idle(int seconds)
+{
+	struct pollfd fds[MAX_INPUTS];
+	int count = open_inputs(fds);
+	time_t last = time(NULL);
+
+	prctl(PR_SET_PDEATHSIG, SIGTERM);
+	while (time(NULL) - last < seconds) {
+		int wait_ms = (int)(seconds - (time(NULL) - last)) * 1000;
+		if (poll(fds, (nfds_t)count, wait_ms > 0 ? wait_ms : 0) > 0 && drain_inputs(fds, count))
+			last = time(NULL);
+	}
+	close_inputs(fds, count);
+	return 0;
+}
+
+static void write_text(const char *path, const char *text)
+{
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	ssize_t ignored = write(fd, text, strlen(text));
+	(void)ignored;
+	close(fd);
+}
+
+static void paint(unsigned char *fb, struct fb_var_screeninfo *var,
+		struct fb_fix_screeninfo *fix, size_t size, unsigned step)
+{
+	unsigned bytes = var->bits_per_pixel / 8;
+	unsigned pages = var->yres ? var->yres_virtual / var->yres : 1;
+	unsigned dot = var->xres / 80 + 2;
+	/* A coarse walk over the screen, so no pixel is lit for long. */
+	unsigned x = (step * 7919u) % (var->xres - dot);
+	unsigned y = (step * 104729u) % (var->yres - dot);
+
+	memset(fb, 0, size);
+	if (pages < 1)
+		pages = 1;
+	for (unsigned page = 0; page < pages; page++)
+		for (unsigned row = 0; row < dot; row++) {
+			unsigned char *line = fb + (size_t)(page * var->yres + y + row) * fix->line_length;
+			memset(line + (size_t)x * bytes, 0x60, (size_t)dot * bytes);
+		}
+}
+
+static int run_saver(const char *request_file)
+{
+	struct pollfd fds[MAX_INPUTS];
+	int count = open_inputs(fds);
+	struct fb_var_screeninfo var;
+	struct fb_fix_screeninfo fix;
+	unsigned char *fb = MAP_FAILED;
+	size_t size = 0;
+	int fbfd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+	int disp = open("/dev/disp", O_RDWR | O_CLOEXEC);
+	long saved = -1;
+	unsigned step = 0;
+
+	if (fbfd >= 0 && ioctl(fbfd, FBIOGET_VSCREENINFO, &var) == 0 &&
+	    ioctl(fbfd, FBIOGET_FSCREENINFO, &fix) == 0 && var.bits_per_pixel >= 16) {
+		size = (size_t)fix.line_length * var.yres_virtual;
+		fb = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
+	}
+	if (disp >= 0) {
+		unsigned long param[4] = {0, 0, 0, 0};
+		saved = ioctl(disp, DISP_LCD_GET_BRIGHTNESS, param);
+		param[1] = 0;
+		ioctl(disp, DISP_LCD_SET_BRIGHTNESS, param);
+	}
+	write_text("/sys/class/graphics/fb0/blank", "1");
+
+	{
+		struct sigaction action;
+		memset(&action, 0, sizeof(action));
+		action.sa_handler = stop_running;
+		sigaction(SIGINT, &action, NULL);
+		sigaction(SIGTERM, &action, NULL);
+	}
+	drain_inputs(fds, count);
+	while (running) {
+		if (fb != MAP_FAILED)
+			paint(fb, &var, &fix, size, step++);
+		time_t until = time(NULL) + DOT_SECONDS;
+		bool woke = false;
+		while (running && !woke && time(NULL) < until) {
+			if (request_file && access(request_file, F_OK) == 0) {
+				woke = true;
+				break;
+			}
+			if (poll(fds, (nfds_t)count, 500) > 0 && drain_inputs(fds, count))
+				woke = true;
+		}
+		if (woke)
+			break;
+	}
+
+	write_text("/sys/class/graphics/fb0/blank", "0");
+	if (disp >= 0) {
+		unsigned long param[4] = {0, (unsigned long)(saved > 0 ? saved : 128), 0, 0};
+		ioctl(disp, DISP_LCD_SET_BRIGHTNESS, param);
+		close(disp);
+	}
+	if (fb != MAP_FAILED)
+		munmap(fb, size);
+	if (fbfd >= 0)
+		close(fbfd);
+	close_inputs(fds, count);
+	return 0;
+}
+
 static int send_command(int argc, char **argv)
 {
 	struct sockaddr_un address;
@@ -528,8 +694,9 @@ static void usage(const char *program)
 		"       %s tap BUTTON [milliseconds]\n"
 		"       %s press|release BUTTON\n"
 		"       %s release-all|status\n"
-		"       %s --mirror SOURCE_EVENT DEST_EVENT\n",
-		program, program, program, program, program);
+		"       %s --mirror SOURCE_EVENT DEST_EVENT\n"
+		"       %s --idle SECONDS | --saver [REQUEST_FILE]\n",
+		program, program, program, program, program, program);
 }
 
 int main(int argc, char **argv)
@@ -543,6 +710,10 @@ int main(int argc, char **argv)
 		return run_daemon(argc >= 3 ? argv[2] : socket_path);
 	if (argc == 4 && strcmp(argv[1], "--mirror") == 0)
 		return run_mirror(argv[2], argv[3]);
+	if (argc == 3 && strcmp(argv[1], "--idle") == 0)
+		return run_idle(atoi(argv[2]) > 0 ? atoi(argv[2]) : 300);
+	if (argc >= 2 && strcmp(argv[1], "--saver") == 0)
+		return run_saver(argc >= 3 ? argv[2] : NULL);
 	if (argc < 2) {
 		usage(argv[0]);
 		return 2;

@@ -30,6 +30,11 @@ AUTO_SH="$USERDATA_PATH/auto.sh"
 BEACON_FLAG="$STATE/beacon-enabled"
 SELECTION_FILE="/tmp/${PAK_NAME}-selection.out"
 REQUEST_FILE="/tmp/${PAK_NAME}-request"
+# The status screen can sit untouched for hours; after this long with no input
+# the panel goes dark (see `input --saver`). 0 disables it.
+SAVER_SECONDS=${DEVBRIDGE_SAVER_SECONDS:-300}
+IDLE_PID_FILE="/tmp/${PAK_NAME}-idle.pid"
+IDLE_DONE_FILE="/tmp/${PAK_NAME}-idle.done"
 
 # How often the status is re-read. The screen is only redrawn when one of the
 # watched values actually changes, so this can be brisk without the display
@@ -216,6 +221,29 @@ build_menu() {
 	printf '%s\n' "$menu"
 }
 
+# A background `input --idle` that leaves IDLE_DONE_FILE once nothing has been
+# pressed for SAVER_SECONDS. It survives the screen's relaunches; it dies with
+# its shell, and the input helper also exits when that shell does.
+stop_idle_watch() {
+	pid=$(cat "$IDLE_PID_FILE" 2>/dev/null)
+	case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+	rm -f "$IDLE_PID_FILE" "$IDLE_DONE_FILE"
+}
+
+start_idle_watch() {
+	stop_idle_watch
+	[ "$SAVER_SECONDS" -gt 0 ] 2>/dev/null || return 0
+	sh -c '"$1" --idle "$2" && touch "$3"' devbridge-idle \
+		"$BIN_DIR/input" "$SAVER_SECONDS" "$IDLE_DONE_FILE" </dev/null >/dev/null 2>&1 &
+	printf '%s\n' $! > "$IDLE_PID_FILE"
+}
+
+idle_watch_running() {
+	pid=$(cat "$IDLE_PID_FILE" 2>/dev/null)
+	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+	[ -d "/proc/$pid" ]
+}
+
 first_action_index() {
 	jq -r '[.items[] | .features.unselectable] | index(false) // 0' "$1"
 }
@@ -245,6 +273,8 @@ main_screen() {
 		printf '%s\n' "$list_rc" > "$rc_file"
 	} 2>> "$LOG_FILE" &
 
+	idle_watch_running || [ -f "$IDLE_DONE_FILE" ] || start_idle_watch
+
 	# Ticks fast so a button press is noticed promptly, but only evaluates the
 	# status every POLL_SECONDS, and only redraws when something changed.
 	baseline=$(state_token)
@@ -252,6 +282,7 @@ main_screen() {
 	while [ ! -f "$rc_file" ]; do
 		sleep "$SLEEP_TICK"
 		[ -f "$REQUEST_FILE" ] && break
+		[ -f "$IDLE_DONE_FILE" ] && break
 		now=$(date +%s 2>/dev/null || echo 0)
 		[ $((now - checked)) -lt "$POLL_SECONDS" ] && continue
 		checked="$now"
@@ -266,6 +297,17 @@ main_screen() {
 			sleep 1
 			waited=$((waited + 1))
 		done
+	fi
+
+	# Idle: the screen is off until a press (or a protocol launch) ends the
+	# saver, and then it is drawn afresh.
+	if [ -f "$IDLE_DONE_FILE" ] && [ ! -f "$REQUEST_FILE" ]; then
+		rm -f "$IDLE_DONE_FILE"
+		log "screen saver on"
+		"$BIN_DIR/input" --saver "$REQUEST_FILE" >> "$LOG_FILE" 2>&1
+		log "screen saver off"
+		start_idle_watch
+		[ -f "$REQUEST_FILE" ] || return 143
 	fi
 
 	if [ -f "$REQUEST_FILE" ]; then
@@ -335,6 +377,7 @@ kill_beacon() {
 }
 
 cleanup() {
+	stop_idle_watch
 	rm -f "/tmp/${PAK_NAME}-rows.tsv" "/tmp/${PAK_NAME}-menu.json" \
 		"/tmp/${PAK_NAME}-list.rc" "/tmp/${PAK_NAME}-list.pid" \
 		"$SELECTION_FILE" /tmp/stay_awake
