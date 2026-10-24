@@ -55,11 +55,25 @@ mkdir -p "$STATE" "$LOGS_PATH"
 [ ! -f "$LOG_FILE" ] || mv "$LOG_FILE" "$LOG_FILE.1"
 : > "$LOG_FILE"
 
+# Everything DevBridge starts inherits this: on tg5040 the inherited stdout is
+# the boot pipe procd never drains, and a game launcher tracing its setup with
+# set -x before it redirects filled it, blocking that launcher and every daemon
+# writing to the same pipe (keymon among them).
+[ -n "${DEVBRIDGE_SOURCE_ONLY:-}" ] || exec >> "$LOG_FILE" 2>&1
+
 export HOME="$STATE"
 export PAK_DIR
 export DEVBRIDGE_STATE="$STATE"
-export PATH="$BIN_DIR/$PLATFORM:$BIN_DIR/$architecture:$BIN_DIR:$PATH"
-export LD_LIBRARY_PATH="$PAK_DIR/lib:$SYSTEM_PATH/lib:${LD_LIBRARY_PATH:-}"
+# A launch returns here through game-launch with this environment, so prepend
+# only once: otherwise every game adds another copy of each directory.
+case ":$PATH:" in
+*":$BIN_DIR/$PLATFORM:$BIN_DIR/$architecture:$BIN_DIR:"*) ;;
+*) export PATH="$BIN_DIR/$PLATFORM:$BIN_DIR/$architecture:$BIN_DIR:$PATH" ;;
+esac
+case ":${LD_LIBRARY_PATH:-}:" in
+*":$PAK_DIR/lib:$SYSTEM_PATH/lib:"*) ;;
+*) export LD_LIBRARY_PATH="$PAK_DIR/lib:$SYSTEM_PATH/lib:${LD_LIBRARY_PATH:-}" ;;
+esac
 
 . "$BIN_DIR/devbridge.sh" || exit 1
 

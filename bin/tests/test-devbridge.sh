@@ -296,6 +296,11 @@ out=$(SSH_ORIGINAL_COMMAND="echo plain command" "$FIXTURE/wrapper/shell-wrapper.
 	EOF
 	chmod +x "$FIXTURE/sd/.system/my282/bin/governor.sh"
 	. "$DIR/launch.sh"
+	# A game returns to DevBridge through game-launch with this environment;
+	# starting again must not add another copy of each directory.
+	path_once=$PATH ld_once=$LD_LIBRARY_PATH
+	. "$DIR/launch.sh"
+	[ "$PATH" = "$path_once" ] && [ "$LD_LIBRARY_PATH" = "$ld_once" ]
 	set_cpu_auto
 	[ "$(cat "$FIXTURE/governor-mode")" = auto ]
 
