@@ -35,6 +35,9 @@ REQUEST_FILE="/tmp/${PAK_NAME}-request"
 SAVER_SECONDS=${DEVBRIDGE_SAVER_SECONDS:-300}
 IDLE_PID_FILE="/tmp/${PAK_NAME}-idle.pid"
 IDLE_DONE_FILE="/tmp/${PAK_NAME}-idle.done"
+# Present while the saver runs, so the protocol still reports DevBridge as the
+# foreground and accepts OPEN_GAME/OPEN_PAK (which end the saver).
+SAVER_FILE="/tmp/${PAK_NAME}-saver"
 
 # How often the status is re-read. The screen is only redrawn when one of the
 # watched values actually changes, so this can be brisk without the display
@@ -304,7 +307,11 @@ main_screen() {
 	if [ -f "$IDLE_DONE_FILE" ] && [ ! -f "$REQUEST_FILE" ]; then
 		rm -f "$IDLE_DONE_FILE"
 		log "screen saver on"
-		"$BIN_DIR/input" --saver "$REQUEST_FILE" >> "$LOG_FILE" 2>&1
+		touch "$SAVER_FILE"
+		# fb0 is blanked only where NextUI blanks it (h700); see devbridge-input.
+		blank=; [ "$PLATFORM" = h700 ] && blank=blank-fb
+		"$BIN_DIR/input" --saver "$REQUEST_FILE" $blank >> "$LOG_FILE" 2>&1
+		rm -f "$SAVER_FILE"
 		log "screen saver off"
 		start_idle_watch
 		[ -f "$REQUEST_FILE" ] || return 143
@@ -378,6 +385,7 @@ kill_beacon() {
 
 cleanup() {
 	stop_idle_watch
+	rm -f "$SAVER_FILE"
 	rm -f "/tmp/${PAK_NAME}-rows.tsv" "/tmp/${PAK_NAME}-menu.json" \
 		"/tmp/${PAK_NAME}-list.rc" "/tmp/${PAK_NAME}-list.pid" \
 		"$SELECTION_FILE" /tmp/stay_awake
@@ -385,6 +393,7 @@ cleanup() {
 
 main() {
 	trap cleanup EXIT INT TERM HUP QUIT
+	rm -f "$SAVER_FILE"
 	set_cpu_auto
 	hold_screen_awake
 

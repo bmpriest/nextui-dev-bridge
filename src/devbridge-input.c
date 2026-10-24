@@ -491,7 +491,7 @@ static int run_mirror(const char *src_path, const char *dst_path)
  * hours and was burning into an RG35XXH panel.
  *
  * --idle SECONDS: returns once no input device has reported anything for
- * SECONDS. --saver [REQUEST_FILE]: turns the panel off and, in case a panel
+ * SECONDS. --saver [REQUEST_FILE] [blank-fb]: turns the panel off and, in case a panel
  * ignores that, paints the framebuffer black with one dot that moves every
  * DOT_SECONDS; returns on any input or when REQUEST_FILE appears (a protocol
  * launch is waiting), with the panel back at its previous brightness.
@@ -582,7 +582,10 @@ static void paint(unsigned char *fb, struct fb_var_screeninfo *var,
 		}
 }
 
-static int run_saver(const char *request_file)
+/* blank_fb: also blank fb0, as NextUI does on h700 only. On a TrimUI Brick
+ * blanking fb0 left the device unresponsive (2026-10-24); NextUI turns that
+ * panel off with the backlight alone. */
+static int run_saver(const char *request_file, bool blank_fb)
 {
 	struct pollfd fds[MAX_INPUTS];
 	int count = open_inputs(fds);
@@ -606,7 +609,8 @@ static int run_saver(const char *request_file)
 		param[1] = 0;
 		ioctl(disp, DISP_LCD_SET_BRIGHTNESS, param);
 	}
-	write_text("/sys/class/graphics/fb0/blank", "1");
+	if (blank_fb)
+		write_text("/sys/class/graphics/fb0/blank", "1");
 
 	{
 		struct sigaction action;
@@ -633,7 +637,8 @@ static int run_saver(const char *request_file)
 			break;
 	}
 
-	write_text("/sys/class/graphics/fb0/blank", "0");
+	if (blank_fb)
+		write_text("/sys/class/graphics/fb0/blank", "0");
 	if (disp >= 0) {
 		unsigned long param[4] = {0, (unsigned long)(saved > 0 ? saved : 128), 0, 0};
 		ioctl(disp, DISP_LCD_SET_BRIGHTNESS, param);
@@ -713,7 +718,8 @@ int main(int argc, char **argv)
 	if (argc == 3 && strcmp(argv[1], "--idle") == 0)
 		return run_idle(atoi(argv[2]) > 0 ? atoi(argv[2]) : 300);
 	if (argc >= 2 && strcmp(argv[1], "--saver") == 0)
-		return run_saver(argc >= 3 ? argv[2] : NULL);
+		return run_saver(argc >= 3 && argv[2][0] ? argv[2] : NULL,
+			argc >= 4 && strcmp(argv[3], "blank-fb") == 0);
 	if (argc < 2) {
 		usage(argv[0]);
 		return 2;
