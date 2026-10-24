@@ -450,10 +450,11 @@ eval "set -- $request"
 [ "$2" = "$PROTO_SD/Emus/tg5040/NDS.pak/launch.sh" ]
 [ "$3" = "$nds_rom" ]
 
-# The return wrapper preserves the launched program's status and starts the
-# configured DevBridge return launcher inside the current NextUI transaction.
+# The return wrapper logs the launched program's status and becomes the
+# configured DevBridge return launcher inside the current NextUI transaction:
+# the same process, so a session of launches does not stack up shells.
 printf '#!/bin/sh\nexit 7\n' > "$FIXTURE/protocol-launcher"
-printf '#!/bin/sh\nprintf returned > "$DEVBRIDGE_RETURN_MARKER"\n' > "$FIXTURE/protocol-return"
+printf '#!/bin/sh\nprintf "returned %%s" "$PPID" > "$DEVBRIDGE_RETURN_MARKER"\nexit 0\n' > "$FIXTURE/protocol-return"
 chmod +x "$FIXTURE/protocol-launcher"
 chmod +x "$FIXTURE/protocol-return"
 wrapper_rc=0
@@ -461,9 +462,10 @@ DEVBRIDGE_RETURN_LAUNCHER="$FIXTURE/protocol-return" \
 	DEVBRIDGE_RETURN_MARKER="$FIXTURE/returned" \
 	DEVBRIDGE_GAME_LOG="$FIXTURE/game-launch.log" "$DIR/bin/game-launch" \
 	"$FIXTURE/protocol-launcher" || wrapper_rc=$?
-[ "$wrapper_rc" -eq 7 ]
+[ "$wrapper_rc" -eq 0 ]
 [ "$(cat "$FIXTURE/game-launch.log" | tail -1)" = "launcher_rc=7" ]
-[ "$(cat "$FIXTURE/returned")" = returned ]
+# The return launcher's parent is this test shell, not a waiting wrapper.
+[ "$(cat "$FIXTURE/returned")" = "returned $$" ]
 
 # A state launch publishes the requested slot immediately before the emulator,
 # then removes an unconsumed resume marker after the emulator returns.
@@ -477,7 +479,7 @@ DEVBRIDGE_RETURN_LAUNCHER="$FIXTURE/protocol-return" \
 	DEVBRIDGE_RESUME_CAPTURE="$FIXTURE/resume-capture" \
 	DEVBRIDGE_GAME_LOG="$FIXTURE/game-state-launch.log" "$DIR/bin/game-launch" \
 	--state 3 "$FIXTURE/protocol-state-launcher" || wrapper_rc=$?
-[ "$wrapper_rc" -eq 7 ]
+[ "$wrapper_rc" -eq 0 ]
 [ "$(cat "$FIXTURE/resume-capture")" = 3 ]
 [ ! -e "$FIXTURE/resume-slot" ]
 

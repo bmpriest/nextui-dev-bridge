@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Launch a game or pak selected by the protocol, then run DevBridge again
+# Launch a game or pak selected by the protocol, then become DevBridge again
 # inside NextUI's current launch transaction. NextUI removes /tmp/next after
 # this wrapper returns, so a second handoff written here would be discarded.
 # Nothing is signalled or killed: every frontend completes normally.
@@ -120,7 +120,8 @@ fi
 restore_input
 [ -z "$state_slot" ] || rm -f "$RESUME_SLOT_FILE"
 printf 'launcher_rc=%s\n' "$rc" >> "$LOG"
-return_rc=0
-"$RETURN_LAUNCHER" || return_rc=$?
-[ "$rc" -ne 0 ] || rc=$return_rc
-exit "$rc"
+# Replaced, not called: DevBridge launches the next game from inside this
+# return launcher, so a wrapper that waited on it would stay behind for the
+# rest of the session, one more shell (and one more PATH copy) per launch.
+trap - EXIT INT TERM HUP QUIT
+exec "$RETURN_LAUNCHER"

@@ -433,7 +433,9 @@ main() {
 				# wrapper and let NextUI keep waiting normally.
 				cleanup
 				trap - EXIT INT TERM HUP QUIT
-				exec /bin/sh -c "$request"
+				# exec inside too: BusyBox sh -c otherwise stays as the
+				# wrapper's parent for the rest of the session.
+				exec /bin/sh -c "exec $request"
 				;;
 			0)
 				remember_selection "$menu" "$selection"
