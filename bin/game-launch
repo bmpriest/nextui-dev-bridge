@@ -14,6 +14,7 @@ INPUT_SYSFS_ROOT=${DEVBRIDGE_INPUT_SYSFS_ROOT:-/sys/class/input}
 INPUT_DEV_ROOT=${DEVBRIDGE_INPUT_DEV_ROOT:-/dev/input}
 input_event_remap_target=
 input_js_remap_target=
+mirror_pid=
 state_slot=
 if [ "${1:-}" = --state ]; then
 	[ $# -ge 3 ] || exit 2
@@ -23,11 +24,21 @@ fi
 launcher=$1
 shift
 
+# input_event_named NAME [physical|virtual]: the first event device called
+# NAME, optionally only a real one or only a uinput one (under
+# /sys/devices/virtual). The H700 virtual pad shares the physical pad's name.
 input_event_named() {
 	wanted=$1
+	kind=${2:-}
 	for input in "$INPUT_SYSFS_ROOT"/event*; do
 		[ -r "$input/device/name" ] || continue
 		[ "$(cat "$input/device/name" 2>/dev/null)" = "$wanted" ] || continue
+		if [ -n "$kind" ]; then
+			case "$(cd -P "$input/device" 2>/dev/null && pwd)" in
+			*/devices/virtual/*) [ "$kind" = virtual ] || continue ;;
+			*) [ "$kind" = physical ] || continue ;;
+			esac
+		fi
 		printf '%s/%s\n' "$INPUT_DEV_ROOT" "$(basename "$input")"
 		return 0
 	done
@@ -46,10 +57,22 @@ input_js_for_event() {
 
 remap_drastic_input() {
 	case "$launcher" in */NDS.pak/launch.sh) ;; *) return 0 ;; esac
-	physical=$(input_event_named "TRIMUI Player1") || return 0
-	virtual=$(input_event_named "DevBridge Virtual Controller") || return 0
+	if physical=$(input_event_named "TRIMUI Player1"); then
+		virtual=$(input_event_named "DevBridge Virtual Controller") || return 0
+	elif physical=$(input_event_named "ANBERNIC-keys" physical); then
+		virtual=$(input_event_named "ANBERNIC-keys" virtual) || return 0
+	else
+		return 0
+	fi
 	[ -c "$physical" ] && [ -c "$virtual" ] || return 0
 	physical_js=$(input_js_for_event "$physical" 2>/dev/null || true)
+	# The physical buttons keep working through the virtual pad: the mirror
+	# opens the real device now, before the bind hides it.
+	if [ -x "$BIN_DIR/input" ]; then
+		"$BIN_DIR/input" --mirror "$physical" "$virtual" >/dev/null 2>&1 &
+		mirror_pid=$!
+		sleep 0.2
+	fi
 	virtual_js=$(input_js_for_event "$virtual" 2>/dev/null || true)
 	# DraStic 2.5.2 enumerates only the first SDL joystick. Depending on SDL's
 	# udev path it opens either event3 or js0, so remap both interfaces exposed
@@ -66,6 +89,11 @@ remap_drastic_input() {
 }
 
 restore_input() {
+	if [ -n "$mirror_pid" ]; then
+		kill "$mirror_pid" 2>/dev/null || true
+		wait "$mirror_pid" 2>/dev/null || true
+		mirror_pid=
+	fi
 	if [ -n "$input_js_remap_target" ]; then
 		umount "$input_js_remap_target" 2>/dev/null || true
 		input_js_remap_target=

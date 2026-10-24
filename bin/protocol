@@ -39,6 +39,7 @@ foreground() {
 	fi
 	if pidof minarch.elf >/dev/null 2>&1; then printf 'game\n'
 	elif pidof drastic >/dev/null 2>&1; then printf 'game\n'
+	elif pidof dsperate >/dev/null 2>&1; then printf 'game\n'
 	elif pidof minui-list >/dev/null 2>&1 && [ -f /tmp/DevBridge-menu.json ]; then printf 'devbridge\n'
 	elif pidof netplay.elf >/dev/null 2>&1; then printf 'netplay\n'
 	elif pidof nextui.elf >/dev/null 2>&1; then printf 'nextui\n'
@@ -192,6 +193,7 @@ perf_sample() {
 	printf 'cpu_temp_millideg=%s\n' "$temp"
 	pid=$(pidof minarch.elf 2>/dev/null | awk '{print $1}')
 	[ -n "$pid" ] || pid=$(pidof drastic 2>/dev/null | awk '{print $1}')
+	[ -n "$pid" ] || pid=$(pidof dsperate 2>/dev/null | awk '{print $1}')
 	printf 'game_pid=%s\n' "$pid"
 	if [ -n "$pid" ]; then
 		set -- $(cat "/proc/$pid/stat" 2>/dev/null)

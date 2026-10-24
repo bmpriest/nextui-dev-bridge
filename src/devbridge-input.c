@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -62,11 +63,14 @@ static struct button trimui_buttons[] = {
 };
 
 /*
- * Match ANBERNIC-keys on H700.  NextUI reads every evdev node raw and maps the
- * CODE_* values in its h700 platform.h, so this pad reports those exact codes,
- * with the d-pad as keys rather than a hat.  The device takes that pad's name
- * too (see create_virtual_controller): NextUI also opens every other pad as an SDL
- * joystick, where these codes land on the wrong JOY_* buttons.
+ * Match ANBERNIC-keys on H700: its name, ids, keys and axes, with the d-pad on
+ * the hat as the built-in pad reports it.  NextUI reads every evdev node raw
+ * and maps the CODE_* values in its h700 platform.h (and the hat), so this pad
+ * reports those exact codes.  NextUI also opens every other pad as an SDL
+ * joystick, where these codes land on the wrong JOY_* buttons; under the
+ * built-in pad's name and ids, NextUI's SDL gives this pad the built-in pad's
+ * fixed (TrimUI) button numbers and GUID instead, so a game that reads only
+ * the first SDL joystick (DraStic, with game-launch's remap) sees it unchanged.
  */
 static struct button h700_buttons[] = {
 	{"a",      EV_KEY, 304, 0},
@@ -82,15 +86,19 @@ static struct button h700_buttons[] = {
 	{"l2",     EV_KEY, 314, 0},
 	{"r2",     EV_KEY, 315, 0},
 	{"r3",     EV_KEY, 316, 0},
-	{"up",     EV_KEY, KEY_UP, 0},
-	{"down",   EV_KEY, KEY_DOWN, 0},
-	{"left",   EV_KEY, KEY_LEFT, 0},
-	{"right",  EV_KEY, KEY_RIGHT, 0},
+	{"up",     EV_ABS, ABS_HAT0Y, 0},
+	{"down",   EV_ABS, ABS_HAT0Y, 0},
+	{"left",   EV_ABS, ABS_HAT0X, 0},
+	{"right",  EV_ABS, ABS_HAT0X, 0},
 };
+
+/* The built-in pad's other keys (power-menu ESC, volume, 354) and axes. */
+static const int h700_extra_keys[] = {KEY_ESC, KEY_VOLUMEDOWN, KEY_VOLUMEUP, 354};
+static const int h700_axes[] = {ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_HAT0X, ABS_HAT0Y};
 
 static struct button *buttons = trimui_buttons;
 static size_t button_count = sizeof(trimui_buttons) / sizeof(trimui_buttons[0]);
-static bool layout_has_axes = true;
+static bool h700_layout = false;
 
 static int select_layout(const char *name)
 {
@@ -99,7 +107,7 @@ static int select_layout(const char *name)
 	if (strcasecmp(name, "h700") == 0) {
 		buttons = h700_buttons;
 		button_count = sizeof(h700_buttons) / sizeof(h700_buttons[0]);
-		layout_has_axes = false;
+		h700_layout = true;
 		return 0;
 	}
 	fprintf(stderr, "DevBridge input: unknown layout %s\n", name);
@@ -182,9 +190,9 @@ static int release_all(void)
 		if (buttons[i].type == EV_KEY && emit(EV_KEY, buttons[i].code, 0))
 			failed = 1;
 	}
-	if (layout_has_axes &&
-	    (emit(EV_ABS, ABS_HAT0X, 0) || emit(EV_ABS, ABS_HAT0Y, 0) ||
-	     emit(EV_ABS, ABS_Z, 0) || emit(EV_ABS, ABS_RZ, 0)))
+	if (emit(EV_ABS, ABS_HAT0X, 0) || emit(EV_ABS, ABS_HAT0Y, 0))
+		failed = 1;
+	if (!h700_layout && (emit(EV_ABS, ABS_Z, 0) || emit(EV_ABS, ABS_RZ, 0)))
 		failed = 1;
 	if (sync_events())
 		failed = 1;
@@ -203,19 +211,37 @@ static int create_virtual_controller(void)
 	uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
 	if (uinput_fd < 0)
 		return -1;
-	if (!layout_has_axes) {
-		if (ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY) < 0)
+	if (h700_layout) {
+		if (ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY) < 0 ||
+		    ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS) < 0)
 			return -1;
 		for (i = 0; i < button_count; ++i)
-			if (ioctl(uinput_fd, UI_SET_KEYBIT, buttons[i].code) < 0)
+			if (buttons[i].type == EV_KEY &&
+			    ioctl(uinput_fd, UI_SET_KEYBIT, buttons[i].code) < 0)
 				return -1;
+		for (i = 0; i < sizeof(h700_extra_keys) / sizeof(h700_extra_keys[0]); ++i)
+			if (ioctl(uinput_fd, UI_SET_KEYBIT, h700_extra_keys[i]) < 0)
+				return -1;
+		for (i = 0; i < sizeof(h700_axes) / sizeof(h700_axes[0]); ++i)
+			if (ioctl(uinput_fd, UI_SET_ABSBIT, h700_axes[i]) < 0)
+				return -1;
+		ioctl(uinput_fd, UI_SET_PHYS, "gpio-keys-polled/input0");
 		memset(&device, 0, sizeof(device));
 		/* NextUI-h700 reads its built-in pad through raw evdev and also opens
-		 * every other pad as an SDL joystick, skipping only this name. SDL
-		 * numbers this device's buttons from KEY_UP upwards, so as a joystick
-		 * Up would arrive a second time as button 0 - which is A there. */
+		 * every other pad as an SDL joystick, skipping only this name. */
 		strncpy(device.name, "ANBERNIC-keys", UINPUT_MAX_NAME_SIZE - 1);
-		device.id.bustype = BUS_VIRTUAL;
+		device.id.bustype = BUS_HOST;
+		device.id.vendor = 0x0001;
+		device.id.product = 0x0001;
+		device.id.version = 0x0100;
+		device.absmin[ABS_HAT0X] = -1;
+		device.absmax[ABS_HAT0X] = 1;
+		device.absmin[ABS_HAT0Y] = -1;
+		device.absmax[ABS_HAT0Y] = 1;
+		device.absmin[ABS_Z] = device.absmin[ABS_RX] = -4096;
+		device.absmax[ABS_Z] = device.absmax[ABS_RX] = 4096;
+		device.absmin[ABS_RY] = device.absmin[ABS_RZ] = -4096;
+		device.absmax[ABS_RY] = device.absmax[ABS_RZ] = 4096;
 		if (write(uinput_fd, &device, sizeof(device)) != sizeof(device) ||
 		    ioctl(uinput_fd, UI_DEV_CREATE) < 0)
 			return -1;
@@ -381,6 +407,80 @@ static int run_daemon(const char *path)
 	return 0;
 }
 
+/*
+ * --mirror SRC DST: copy every event from SRC, the physical pad, into DST,
+ * the virtual one. game-launch binds the virtual pad over the physical pad's
+ * device nodes while DraStic runs (DraStic reads only the first joystick), and
+ * without this the physical buttons did nothing until DraStic exited - which
+ * they could not make it do. SRC is opened before that bind, so it is still
+ * the real device. Writing to an event node injects into that device, and the
+ * input core drops whatever DST does not declare. Ends when SRC goes away,
+ * on SIGTERM, or when the launching shell dies, releasing what it held.
+ */
+static int run_mirror(const char *src_path, const char *dst_path)
+{
+	int src = open(src_path, O_RDONLY | O_CLOEXEC);
+	int dst = open(dst_path, O_WRONLY | O_CLOEXEC);
+	unsigned char held[KEY_CNT];
+	bool axis_set[ABS_CNT];
+	struct input_event event;
+
+	if (src < 0 || dst < 0) {
+		perror("DevBridge input: mirror open");
+		return 1;
+	}
+	memset(held, 0, sizeof(held));
+	memset(axis_set, 0, sizeof(axis_set));
+	/* Without SA_RESTART, so a signal ends the blocked read at once; with
+	 * signal()'s restart semantics it waited for the next button press. */
+	{
+		struct sigaction action;
+		memset(&action, 0, sizeof(action));
+		action.sa_handler = stop_running;
+		sigaction(SIGINT, &action, NULL);
+		sigaction(SIGTERM, &action, NULL);
+	}
+	prctl(PR_SET_PDEATHSIG, SIGTERM);
+	if (getppid() == 1)
+		running = 0;   /* the launcher is already gone */
+	while (running && read(src, &event, sizeof(event)) == (ssize_t)sizeof(event)) {
+		if (event.type == EV_KEY && event.code < KEY_CNT && event.value != 2)
+			held[event.code] = event.value != 0;
+		else if (event.type == EV_ABS && event.code < ABS_CNT)
+			axis_set[event.code] = event.value != 0;
+		if (write(dst, &event, sizeof(event)) != (ssize_t)sizeof(event))
+			break;
+	}
+	memset(&event, 0, sizeof(event));
+	for (int code = 0; code < KEY_CNT; code++) {
+		if (!held[code])
+			continue;
+		event.type = EV_KEY;
+		event.code = (unsigned short)code;
+		event.value = 0;
+		if (write(dst, &event, sizeof(event)) < 0)
+			break;
+	}
+	for (int code = 0; code < ABS_CNT; code++) {
+		if (!axis_set[code] || (code != ABS_HAT0X && code != ABS_HAT0Y))
+			continue;
+		event.type = EV_ABS;
+		event.code = (unsigned short)code;
+		event.value = 0;
+		if (write(dst, &event, sizeof(event)) < 0)
+			break;
+	}
+	event.type = EV_SYN;
+	event.code = SYN_REPORT;
+	event.value = 0;
+	if (write(dst, &event, sizeof(event)) < 0) {
+		/* nothing more to do */
+	}
+	close(src);
+	close(dst);
+	return 0;
+}
+
 static int send_command(int argc, char **argv)
 {
 	struct sockaddr_un address;
@@ -427,8 +527,9 @@ static void usage(const char *program)
 		"usage: %s --daemon [socket]\n"
 		"       %s tap BUTTON [milliseconds]\n"
 		"       %s press|release BUTTON\n"
-		"       %s release-all|status\n",
-		program, program, program, program);
+		"       %s release-all|status\n"
+		"       %s --mirror SOURCE_EVENT DEST_EVENT\n",
+		program, program, program, program, program);
 }
 
 int main(int argc, char **argv)
@@ -440,6 +541,8 @@ int main(int argc, char **argv)
 		return 2;
 	if (argc >= 2 && strcmp(argv[1], "--daemon") == 0)
 		return run_daemon(argc >= 3 ? argv[2] : socket_path);
+	if (argc == 4 && strcmp(argv[1], "--mirror") == 0)
+		return run_mirror(argv[2], argv[3]);
 	if (argc < 2) {
 		usage(argv[0]);
 		return 2;
