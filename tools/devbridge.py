@@ -115,7 +115,12 @@ class SSHTransport:
             f'    ControlPath "{root}/ssh-%C"',
             "    ControlPersist 120",
         ]
-        if args.identity:
+        if args.identity and args.password_fallback:
+            # Mixed rigs: devices with the key use it, the rest get the password.
+            lines += [f'    IdentityFile "{args.identity}"',
+                      "    PreferredAuthentications publickey,password",
+                      "    NumberOfPasswordPrompts 1"]
+        elif args.identity:
             lines += [f'    IdentityFile "{args.identity}"', "    BatchMode yes"]
         else:
             lines += ["    PreferredAuthentications password", "    PubkeyAuthentication no"]
@@ -124,6 +129,9 @@ class SSHTransport:
 
     def close(self):
         self.temp.cleanup()
+
+    def uses_password(self):
+        return not self.args.identity or self.args.password_fallback
 
     def environment(self):
         env = os.environ.copy()
@@ -150,7 +158,7 @@ class SSHTransport:
                 "sh", "-lc", shlex.quote(command),
             ]
             environment = self.environment()
-            start_new_session = not bool(self.args.identity)
+            start_new_session = self.uses_password()
             transport_name = "SSH"
         try:
             result = subprocess.run(
@@ -178,7 +186,7 @@ class SSHTransport:
                 f"{self.args.user}@{device.address}:{remote_path}", str(local_path),
             ]
             environment = self.environment()
-            start_new_session = not bool(self.args.identity)
+            start_new_session = self.uses_password()
         try:
             result = subprocess.run(
                 argv, text=True, capture_output=True, stdin=subprocess.DEVNULL,
@@ -837,6 +845,8 @@ def parser():
     result.add_argument("--port", type=int, default=22)
     result.add_argument("--identity", type=Path)
     result.add_argument("--password-env", default="DEVBRIDGE_PASSWORD")
+    result.add_argument("--password-fallback", action="store_true",
+                        help="with --identity, fall back to the password for devices without the key")
     result.add_argument("--connect-timeout", type=int, default=8)
     result.add_argument("--operation-timeout", type=int, default=120)
     result.add_argument("--launch-timeout", type=int, default=30)
@@ -845,7 +855,7 @@ def parser():
         help="minimum interval between protocol command starts per device (default: 100)",
     )
     result.add_argument("--session-root", default="devbridge-sessions")
-    result.add_argument("--connect", action="append", default=[], metavar="ADDRESS[:ALIAS]")
+    result.add_argument("--connect", action="append", default=[], metavar="ADDRESS[:ALIAS[:PORT]]")
     result.add_argument("--adb", action="append", default=[], metavar="SERIAL[=ALIAS]",
                         help="connect through a USB or network ADB device serial")
     result.add_argument("--interface", default="0.0.0.0")
@@ -865,8 +875,11 @@ def main():
     runner = Runner(args)
     try:
         for item in args.connect:
-            address, separator, alias = item.partition(":")
-            runner.connect(address, alias if separator else None)
+            # ADDRESS[:ALIAS[:PORT]]: a per-device port reaches a device
+            # through a tunnel while the others stay direct.
+            address, _, rest = item.partition(":")
+            alias, _, port = rest.partition(":")
+            runner.connect(address, alias or None, int(port) if port else None)
         for item in args.adb:
             serial, separator, alias = item.partition("=")
             runner.connect_adb(serial, alias if separator else None)
