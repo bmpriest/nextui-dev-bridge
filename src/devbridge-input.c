@@ -434,6 +434,16 @@ static int run_mirror(const char *src_path, const char *dst_path)
 		perror("DevBridge input: mirror open");
 		return 1;
 	}
+	/* The same device on both ends - SRC opened through a bind of DST left
+	 * by an earlier launch - would feed every event back into itself. */
+	{
+		struct stat src_st, dst_st;
+		if (fstat(src, &src_st) == 0 && fstat(dst, &dst_st) == 0 &&
+		    src_st.st_rdev == dst_st.st_rdev) {
+			fprintf(stderr, "DevBridge input: mirror source is its destination\n");
+			return 1;
+		}
+	}
 	memset(held, 0, sizeof(held));
 	memset(axis_set, 0, sizeof(axis_set));
 	/* Without SA_RESTART, so a signal ends the blocked read at once; with

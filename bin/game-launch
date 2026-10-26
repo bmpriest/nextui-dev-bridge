@@ -45,6 +45,8 @@ input_event_named() {
 	return 1
 }
 
+. "$BIN_DIR/input-binds.sh"
+
 input_js_for_event() {
 	event=$1
 	for handler in "$INPUT_SYSFS_ROOT/$(basename "$event")/device"/js*; do
@@ -66,6 +68,11 @@ remap_drastic_input() {
 	fi
 	[ -c "$physical" ] && [ -c "$virtual" ] || return 0
 	physical_js=$(input_js_for_event "$physical" 2>/dev/null || true)
+	# A bind an earlier launch failed to undo would make the mirror below
+	# copy the virtual pad into itself.
+	input_unbind "$physical" || printf 'input_stale_bind=%s\n' "$physical" >> "$LOG"
+	[ -z "$physical_js" ] || input_unbind "$physical_js" ||
+		printf 'input_stale_bind=%s\n' "$physical_js" >> "$LOG"
 	# The physical buttons keep working through the virtual pad: the mirror
 	# opens the real device now, before the bind hides it.
 	if [ -x "$BIN_DIR/input" ]; then
@@ -95,11 +102,11 @@ restore_input() {
 		mirror_pid=
 	fi
 	if [ -n "$input_js_remap_target" ]; then
-		umount "$input_js_remap_target" 2>/dev/null || true
+		input_unbind "$input_js_remap_target" || true
 		input_js_remap_target=
 	fi
 	if [ -n "$input_event_remap_target" ]; then
-		umount "$input_event_remap_target" 2>/dev/null || true
+		input_unbind "$input_event_remap_target" || true
 		input_event_remap_target=
 	fi
 }

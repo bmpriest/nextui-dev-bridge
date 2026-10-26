@@ -488,6 +488,26 @@ DEVBRIDGE_RETURN_LAUNCHER="$FIXTURE/protocol-return" \
 [ "$(cat "$FIXTURE/resume-capture")" = 3 ]
 [ ! -e "$FIXTURE/resume-slot" ]
 
+# Stacked input binds left by launches whose umount failed (busy node) all
+# come off: a plain umount fails here as on a busy node, a lazy one works.
+mkdir -p "$FIXTURE/umount-bin"
+cat > "$FIXTURE/umount-bin/umount" <<'EOS'
+#!/bin/sh
+[ "$1" = -l ] || exit 1
+awk -v n="$2" '!done && index($0, " " n " ") { done = 1; next } { print }' \
+	"$PROC_MOUNTS" > "$PROC_MOUNTS.tmp" && mv "$PROC_MOUNTS.tmp" "$PROC_MOUNTS"
+EOS
+chmod +x "$FIXTURE/umount-bin/umount"
+{
+	printf 'rootfs / rootfs rw 0 0\n'
+	for i in 1 2 3; do printf 'devtmpfs /dev/input/event3 devtmpfs rw 0 0\n'; done
+	printf 'devtmpfs /dev/input/event30 devtmpfs rw 0 0\n'
+} > "$FIXTURE/mounts-stacked"
+PATH="$FIXTURE/umount-bin:$PATH" PROC_MOUNTS="$FIXTURE/mounts-stacked" \
+	sh -c ". $DIR/bin/input-binds.sh; input_unbind /dev/input/event3"
+! grep -q ' /dev/input/event3 ' "$FIXTURE/mounts-stacked"
+grep -q ' /dev/input/event30 ' "$FIXTURE/mounts-stacked"
+
 PYTHONDONTWRITEBYTECODE=1 python3 "$DIR/bin/tests/test-protocol.py"
 
 PYTHONDONTWRITEBYTECODE=1 python3 "$DIR/bin/tests/test-discovery.py"
