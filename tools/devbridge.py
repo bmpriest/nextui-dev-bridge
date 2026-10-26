@@ -499,6 +499,7 @@ class Runner:
     #: Mean absolute difference, per pixel, of a 64x48 greyscale reduction.
     #: Identical screens score 0; the same screen with different text scores a
     #: few units; a different screen scores tens.
+    POLL_INTERVAL = 0.5
     VERIFY_THRESHOLD = 10.0
 
     @staticmethod
@@ -580,20 +581,19 @@ class Runner:
             raise ProtocolError(f"VERIFY reference not found: {expected}")
         limit = self.VERIFY_THRESHOLD if threshold is None else threshold
 
-        # VERIFY checks once. VERIFY_WAIT checks at the start, halfway through
-        # the timeout and at the end, and only fails if all three miss.
-        if timeout_ms is None:
-            delays = [0.0]
-        else:
-            half = timeout_ms / 2000.0
-            delays = [0.0, half, half]
-
+        # VERIFY checks once. VERIFY_WAIT keeps capturing until the screen
+        # matches or the timeout runs out, at most every POLL_INTERVAL. It
+        # used to look only at the start, the middle and the end, which made
+        # a test's timing a guess: a device that launched a few seconds slow
+        # missed all three looks at a menu that then ran into its demo.
+        deadline = time.monotonic() + (timeout_ms or 0) / 1000.0
         pending = {device.alias: device for device in devices}
         best: dict[str, float] = {}
         best_shot: dict[str, Path] = {}
-        for index, delay in enumerate(delays):
-            if delay:
-                time.sleep(delay)
+        index = -1
+        while True:
+            index += 1
+            started = time.monotonic()
             for alias in list(pending):
                 device = pending[alias]
                 shot = self._capture_frame(device)
@@ -620,6 +620,11 @@ class Runner:
                     del pending[alias]
             if not pending:
                 return
+            if timeout_ms is None or time.monotonic() >= deadline:
+                break
+            pause = self.POLL_INTERVAL - (time.monotonic() - started)
+            if pause > 0:
+                time.sleep(min(pause, max(0.0, deadline - time.monotonic())))
 
         for alias, score in sorted(best.items()):
             if alias in pending:
