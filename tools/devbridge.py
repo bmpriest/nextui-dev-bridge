@@ -794,6 +794,43 @@ class Runner:
             self.verify(self.selected(prefix), arguments[0],
                         int(arguments[1]) if waiting else None,
                         options.get("threshold"), options.get("region"))
+        elif command == "VERIFY_UNTIL":
+            # VERIFY_UNTIL REFERENCE TIMEOUT_MS [every=MS] [threshold=N]
+            #     [region=X,Y,W,H] :: SHELL COMMAND...
+            # Check for the screen for `every` ms; while it is not there, run
+            # the command on the device (a key press) and check again, until
+            # TIMEOUT_MS. For a press whose effect lands late - over a lagging
+            # link a fixed wait sent a second START onto a menu that had
+            # already opened, and the game started the wrong mode. The check
+            # always comes first, so nothing is pressed once the screen shows.
+            if "::" not in arguments or len(arguments) < 4:
+                raise ProtocolError(
+                    "usage: VERIFY_UNTIL REFERENCE TIMEOUT_MS [every=MS] "
+                    "[threshold=N] [region=X,Y,W,H] :: COMMAND...")
+            split = arguments.index("::")
+            head, shell = arguments[:split], arguments[split + 1:]
+            every = 3000
+            extras = []
+            for extra in head[2:]:
+                if extra.startswith("every="):
+                    every = int(extra.partition("=")[2])
+                else:
+                    extras.append(extra)
+            options = verify_options(extras)
+            devices = self.selected(prefix)
+            deadline = time.monotonic() + int(head[1]) / 1000
+            while True:
+                try:
+                    self.verify(devices, head[0], every,
+                                options.get("threshold"), options.get("region"))
+                    break
+                except ProtocolError:
+                    if time.monotonic() >= deadline:
+                        raise
+                shell_command = shlex.join(shell)
+                for device in devices:
+                    print(f"{device.alias}: not yet; {shell_command}")
+                    self.protocol(device, "terminal", shell_command, check=False)
         elif command == "SCREEN":
             self.screenshot(self.selected(prefix), arguments[0] if arguments else None)
         elif command == "WAIT":
@@ -830,7 +867,8 @@ class Runner:
                 line = input("devbridge> ")
                 if line.strip().upper() == "HELP":
                     print("CONNECT CONNECT_ADB STATUS GET_* BTN OPEN_GAME OPEN_RANDOM_GAME OPEN_PAK "
-                          "QUIT_GAME SCREEN VERIFY VERIFY_WAIT PERF WAIT WAIT_FOR TRM SESSION EXIT")
+                          "QUIT_GAME SCREEN VERIFY VERIFY_WAIT VERIFY_UNTIL PERF WAIT WAIT_FOR TRM "
+                          "SESSION EXIT")
                     continue
                 if not self.execute(line):
                     return 0
