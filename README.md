@@ -102,6 +102,16 @@ button 0, which h700's `JOY_*` table reads as A, so every Up also pressed A. The
 h700 virtual pad is therefore named `ANBERNIC-keys`, the one name NextUI-h700
 leaves to its evdev path.
 
+## DraStic input
+
+DraStic reads only the first SDL joystick, which is the physical pad. For an
+NDS.pak launch, the game wrapper bind-mounts the virtual pad over the physical
+pad's `/dev/input` nodes and mirrors the physical buttons into it, so both
+DevBridge input and the real buttons work; it removes the binds when DraStic
+exits, including any a previous launch failed to remove. If DraStic's menus
+ever move by themselves, look for binds left behind:
+`grep ' /dev/input/' /proc/mounts` with no game running should print nothing.
+
 ## Discovery
 
 With the beacon enabled, the device multicasts a status line to
@@ -281,9 +291,23 @@ python3 tools/devbridge.py --adb BRICK_SERIAL=brick shell
 It can inventory ROMs/emulators/paks and their associated MinArch save states,
 operate buttons and chords, launch games normally or directly into a verified
 state slot, return to DevBridge after MinArch quits, capture the visible
-framebuffer, sample performance into CSV, run explicit terminal escape
-commands, and retain a JSONL transcript. Devices may use persistent SSH/SCP or
-USB ADB (`adb shell`/`adb pull`), including both transports in one session.
+framebuffer, check it against reference screens (`VERIFY`, `VERIFY_WAIT`,
+which polls until the screen appears, and `VERIFY_UNTIL`, which presses until
+it does), sample performance into CSV, run explicit terminal escape commands,
+and retain a JSONL transcript. Devices may use persistent SSH/SCP or USB ADB
+(`adb shell`/`adb pull`), including both transports in one session; with
+`--identity KEY --password-fallback`, key and password devices mix too, and
+`--connect ADDRESS:ALIAS:PORT` reaches one through a tunnel:
+
+```sh
+python3 tools/devbridge.py --identity ~/.ssh/id_ed25519 --password-fallback \
+    --adb BRICK_SERIAL=host --connect 127.0.0.1:guest:40123 run race.test
+```
+
+For a long unattended run, keep timing-sensitive input on the device (a helper
+script run with `TRM`): a remote `BTN` is two round trips, and over a tunnel its
+hold stretches into auto-repeats. Netplay's `testing/devbridge/` has working
+examples (`device/keys.sh`, `device/quit.sh`) and a matrix runner built on this.
 
 The current `PERF` command provides functional diagnostic telemetry, not a
 calibrated benchmark. Each sample invokes remote commands and reads `/proc` and

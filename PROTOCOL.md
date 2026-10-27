@@ -19,7 +19,13 @@ python3 tools/devbridge.py --adb BRICK_SERIAL=brick shell
 
 The bundled-provider password defaults to DevBridge's documented development
 password, `tina`. Set `DEVBRIDGE_PASSWORD` for another password, or pass
-`--identity PATH` for key authentication.
+`--identity PATH` for key authentication. With `--identity PATH
+--password-fallback`, devices that accept the key use it and the rest fall
+back to the password, so one run can mix devices set up either way.
+
+`--connect ADDRESS[:ALIAS[:PORT]]` takes an optional per-device SSH port, for a
+device reached through a tunnel (`127.0.0.1:guest:40123`) alongside direct
+ones; `--port` remains the default for the others.
 
 The intended agent approval boundary is the stable command prefix:
 
@@ -64,10 +70,10 @@ form is `--adb SERIAL[=ALIAS]`. SSH and ADB devices can coexist in one session;
 aliases and `all:` targeting work identically for both. Screenshot retrieval
 uses `adb pull` for ADB devices instead of SCP. USB permissions and attachment
 remain host/WSL responsibilities rather than device-protocol operations.
-The ADB transport is implemented and covered by host tests. On the current WSL
-agent host, both Bricks enumerate as USB ID `18d1:d002`, but live commands are
-still blocked by Linux USB permissions until an appropriate udev rule or a
-privileged ADB server is configured.
+The ADB transport is live-validated: Netplay's unattended test matrix
+(2026-10-26/27) drove a Brick over USB ADB alongside SSH devices for over a
+hundred cells. An ADB device keeps working when its WiFi changes networks,
+which makes it the stable anchor of a multi-device rig.
 
 ### Inventory and terminal access
 
@@ -129,6 +135,16 @@ ROMs may be relative to `Roms/`, absolute beneath `/mnt/SDCARD/Roms`, or use
 the inventory form `TAG://relative/path`. Emulator tags resolve to
 `Emus/PLATFORM/TAG.pak/launch.sh`.
 
+DraStic (NDS.pak) enumerates only the first SDL joystick, so for an NDS.pak
+launch the wrapper bind-mounts the virtual pad over the physical pad's
+`/dev/input` nodes and mirrors the physical buttons into it, undoing both when
+DraStic exits. The undo removes every bind stacked on those nodes, lazily if a
+process still holds them, and stale binds are cleared before binding: a silently
+failed `umount` used to leave one bind per launch, and the next launch's mirror
+then copied the virtual pad into itself, a flood of D-pad events that scrolled
+DraStic's menus on their own. The mirror also refuses a source that is its own
+destination.
+
 `OPEN_GAME_STATE` first verifies that the requested slot exists for the ROM
 and active core. The wrapper atomically publishes MinArch's ordinary
 `/tmp/resume_slot.txt` immediately before launch. MinArch consumes that marker
@@ -139,10 +155,38 @@ NextUI resume. An unconsumed marker is removed when the launcher returns.
 
 ```text
 SCREEN [LABEL]
+VERIFY REFERENCE [threshold=N] [region=X,Y,W,H]
+VERIFY_WAIT REFERENCE TIMEOUT_MS [threshold=N] [region=X,Y,W,H]
+VERIFY_UNTIL REFERENCE TIMEOUT_MS [every=MS] [threshold=N] [region=X,Y,W,H] :: COMMAND...
 PERF [DURATION_MS] [INTERVAL_MS]
 WAIT MILLISECONDS
 KEEP_SCREEN_ON
 ```
+
+`VERIFY` compares the visible screen with a reference PNG once and fails the
+run if it does not match. The score is the mean absolute difference of a 64x48
+greyscale reduction: 0 is identical, the same screen with changed text scores a
+few units, a different screen tens. The default threshold is 10. `region=`
+crops both images first; integers are pixels, values with a decimal point are
+fractions of the screen, so one crop works across resolutions.
+
+`VERIFY_WAIT` keeps capturing, at most every 0.5 s, until the screen matches or
+the timeout runs out, and returns on the first match. (Before ee0079b it looked
+only at the start, middle and end of the timeout, which made test timing a
+guess.) Because it returns at the first match, a generous timeout costs nothing
+when the screen is on time: size it for the slowest plausible case. It also
+means a following press can arrive the moment a screen appears, before the game
+accepts input; settle with `WAIT` or use `VERIFY_UNTIL`.
+
+`VERIFY_UNTIL` is for a press whose effect lands late or can be lost: it checks
+for the screen for `every` ms (default 3000) and, while it is not there, runs
+`COMMAND` on the device through the terminal endpoint (typically a key-press
+helper), then checks again, until `TIMEOUT_MS`. The check always comes first,
+so nothing is pressed once the screen shows. Use it only where a repeated press
+is harmless once the target screen is up.
+
+Every failing check keeps its closest capture as
+`verify-miss-REFERENCE-ALIAS.png` in the session directory.
 
 `SCREEN` captures only the visible framebuffer page and converts BGRA to PNG
 when host `ffmpeg` is available. `PERF` records timestamp, foreground state,
@@ -181,7 +225,10 @@ metadata use `key=value` lines; inventories use TSV; failures are nonzero with
 
 ## Current validation status
 
-DevBridge 0.7.0 has ten passing host-side tests. On TrimUI Brick `.144`, the
+DevBridge 0.7.0's host-side tests pass (`make test`). Netplay's unattended
+matrix (2026-10-26/27) exercised SSH (key and password), ADB and tunnelled
+devices together, `VERIFY_WAIT`/`VERIFY_UNTIL`, and DraStic, DSperate and
+MinArch launches on TrimUI Brick and RG35XXH for about ten hours. On TrimUI Brick `.144`, the
 protocol has been validated over SSH for inventory, controller input,
 framebuffer capture, telemetry capture, game launch, normal MinArch quit, and
 automatic return to DevBridge. `GET_ROM_SAVESTATES` and `OPEN_GAME_STATE` were
@@ -197,8 +244,19 @@ server reports insufficient USB permissions for both attached Bricks.
 ## Deliberate v1 limits
 
 - Conditional `IF/THEN/ELSE` syntax is reserved but not implemented yet.
-- `QUIT_GAME` knows MinArch's standard five-row menu. Other standalone
-  emulators need typed exit adapters.
+- `QUIT_GAME` knows MinArch's standard five-row menu and drives it with
+  remote presses. Over a slow or tunnelled link those presses stretch into
+  auto-repeats, and an older MinArch may lay its menu out differently; tests
+  that must exit reliably run an on-device quit helper with fallbacks
+  (Netplay's `testing/devbridge/device/quit.sh`). Other standalone emulators
+  need typed exit adapters.
+- Remote `BTN` presses are two round trips each (press, release), so their
+  hold time includes link latency. Timing-sensitive input should run on the
+  device (a helper invoked with `TRM`) rather than as `BTN`.
+- There is no suite-level setup or teardown yet: a test inherits whatever the
+  previous one left (settings, emulator configuration, processes). See the
+  planned `CONFIG_SNAPSHOT`/`CONFIG_RESTORE`, `FINALLY`,
+  `RETURN_TO_DEVBRIDGE` and `RECOVER_INPUT`.
 - Settings currently use `TRM`; typed transactional config edits and automatic
   restore/rollback belong in the next protocol revision.
 - Performance sampling observes Linux/frontend telemetry. Emulator-specific
