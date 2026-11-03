@@ -1,18 +1,36 @@
 #!/bin/sh
-# H700 Spruce controller commands, using the same event1 path and sendevent
-# utility as Spruce's own PyUI device integration.
+# Spruce controller commands, written into the built-in pad's own evdev node
+# with Spruce's sendevent utility. PyUI and RetroArch both read the built-in
+# pad (RetroArch as SDL joypad 0), so a separate uinput pad never reaches them.
 SEND=/mnt/SDCARD/spruce/bin64/sendevent
-DEVICE=/dev/input/event1
 command=$1
 button=$2
 duration=${3:-80}
 
+# The built-in pad, found by name: ANBERNIC-keys on H700, TRIMUI Player1
+# (trimui_inputd's pad) on the Brick and other TrimUI devices.
+DEVICE=
+LAYOUT=
+for name_file in /sys/class/input/event*/device/name; do
+    case "$(cat "$name_file" 2>/dev/null)" in
+        ANBERNIC-keys) LAYOUT=anbernic ;;
+        'TRIMUI Player1') LAYOUT=trimui ;;
+        *) continue ;;
+    esac
+    node=${name_file%/device/name}
+    DEVICE=/dev/input/${node##*/}
+    break
+done
+
 event_for() {
     case "$1" in
-        up) type=3; code=17; down=-1 ;;
-        down) type=3; code=17; down=1 ;;
-        left) type=3; code=16; down=-1 ;;
-        right) type=3; code=16; down=1 ;;
+        up) type=3; code=17; down=-1; return ;;
+        down) type=3; code=17; down=1; return ;;
+        left) type=3; code=16; down=-1; return ;;
+        right) type=3; code=16; down=1; return ;;
+    esac
+    [ "$LAYOUT" = trimui ] && trimui_event_for "$1" && return
+    case "$1" in
         a) type=1; code=304; down=1 ;;
         b) type=1; code=305; down=1 ;;
         x) type=1; code=307; down=1 ;;
@@ -29,12 +47,32 @@ event_for() {
         *) printf 'error unknown button\n' >&2; exit 1 ;;
     esac
 }
+# TRIMUI Player1's codes, as devbridge-input's trimui layout reports them:
+# B/A are BTN_SOUTH/EAST and the triggers are the ABS_Z/ABS_RZ axes.
+trimui_event_for() {
+    case "$1" in
+        a) type=1; code=305; down=1 ;;
+        b) type=1; code=304; down=1 ;;
+        x) type=1; code=308; down=1 ;;
+        y) type=1; code=307; down=1 ;;
+        l1) type=1; code=310; down=1 ;;
+        r1) type=1; code=311; down=1 ;;
+        l2) type=3; code=2; down=32767 ;;
+        r2) type=3; code=5; down=32767 ;;
+        l3) type=1; code=317; down=1 ;;
+        r3) type=1; code=318; down=1 ;;
+        select) type=1; code=314; down=1 ;;
+        start) type=1; code=315; down=1 ;;
+        menu) type=1; code=316; down=1 ;;
+        *) return 1 ;;
+    esac
+}
 send_event() {
     printf '%s %s %s\n0 0 0\n' "$type" "$code" "$1" | "$SEND" "$DEVICE"
 }
 case "$command" in
     status)
-        [ -w "$DEVICE" ] && [ -x "$SEND" ] || { printf 'error unavailable\n' >&2; exit 1; }
+        [ -n "$DEVICE" ] && [ -w "$DEVICE" ] && [ -x "$SEND" ] || { printf 'error unavailable\n' >&2; exit 1; }
         printf 'ok ready\n' ;;
     release-all)
         for button in up down left right a b x y l1 r1 l2 r2 l3 r3 select start menu; do

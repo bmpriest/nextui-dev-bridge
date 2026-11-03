@@ -39,9 +39,11 @@ then return to DevBridge. `GET_ROM_SAVESTATES` lists RetroArch states in
 `Saves/states`; `OPEN_GAME_STATE` loads a numbered slot through RetroArch's
 network command interface. The `auto` state uses Spruce's RetroArch automatic
 state loading. `QUIT_GAME` closes RetroArch and returns to the app.
-On H700 Spruce devices, button commands use Spruce's `sendevent` and built-in
-controller event path so they reach PyUI as well as games. Other Spruce devices
-continue to use DevBridge's virtual controller.
+On Spruce H700 devices and the TrimUI Brick, button commands use Spruce's
+`sendevent` to write into the built-in controller's event node, so they reach
+PyUI as well as games: both read only that controller, and RetroArch would take
+a separate virtual pad for an unmapped player 2. Other Spruce devices continue
+to use DevBridge's virtual controller.
 
 It expands on the `SSH Server` pak, which manages Dropbear but leaves you to
 find the IP yourself, offers no SFTP, and shows no device state.

@@ -4,12 +4,13 @@ BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
 . "$BIN_DIR/paths.sh"
 
-# Spruce's Anbernic PyUI reads only the built-in event1 device. Its own
-# sendevent utility writes there, while a uinput pad appears as event3 and is
-# invisible to that menu. Other Spruce models keep the existing virtual pad.
-if [ "$PLATFORM" = spruce ] &&
-	[ "$(cat /sys/class/input/event1/device/name 2>/dev/null)" = ANBERNIC-keys ] &&
-	[ -x "$SDCARD_PATH/spruce/bin64/sendevent" ]; then
+# On Spruce, PyUI and RetroArch read only the built-in pad (ANBERNIC-keys on
+# H700, TRIMUI Player1 on the Brick; RetroArch as SDL joypad 0), so a uinput pad
+# is invisible to the menu and lands on an unmapped player 2 in games.
+# spruce-input writes into the built-in pad's node with Spruce's sendevent.
+# Other Spruce models keep the existing virtual pad.
+if [ "$PLATFORM" = spruce ] && [ -x "$SDCARD_PATH/spruce/bin64/sendevent" ] &&
+	grep -qxE 'ANBERNIC-keys|TRIMUI Player1' /sys/class/input/event*/device/name 2>/dev/null; then
 	exec "$BIN_DIR/spruce-input" "$@"
 fi
 
