@@ -1,6 +1,17 @@
 #!/bin/sh
 
 BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+. "$BIN_DIR/paths.sh"
+
+# Spruce's Anbernic PyUI reads only the built-in event1 device. Its own
+# sendevent utility writes there, while a uinput pad appears as event3 and is
+# invisible to that menu. Other Spruce models keep the existing virtual pad.
+if [ "$PLATFORM" = spruce ] &&
+	[ "$(cat /sys/class/input/event1/device/name 2>/dev/null)" = ANBERNIC-keys ] &&
+	[ -x "$SDCARD_PATH/spruce/bin64/sendevent" ]; then
+	exec "$BIN_DIR/spruce-input" "$@"
+fi
 
 if uname -m 2>/dev/null | grep -q 64; then
 	ARCH_DIR=arm64

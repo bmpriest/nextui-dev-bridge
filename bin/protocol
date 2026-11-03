@@ -6,9 +6,7 @@
 
 BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
-: "${SDCARD_PATH:=/mnt/SDCARD}"
-: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
-: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
+. "$BIN_DIR/paths.sh"
 : "${SHARED_USERDATA_PATH:=$SDCARD_PATH/.userdata/shared}"
 
 REQUEST_FILE=${DEVBRIDGE_REQUEST_FILE:-/tmp/DevBridge-request}
@@ -38,18 +36,39 @@ foreground() {
 		return
 	fi
 	if pidof minarch.elf >/dev/null 2>&1; then printf 'game\n'
+	elif [ "$PLATFORM" = spruce ] &&
+		{ pidof retroarch >/dev/null 2>&1 || pgrep -f '^/mnt/SDCARD/RetroArch/ra' >/dev/null 2>&1; }; then
+		printf 'game\n'
 	elif pidof drastic >/dev/null 2>&1; then printf 'game\n'
 	elif pidof dsperate >/dev/null 2>&1; then printf 'game\n'
+	elif [ "$PLATFORM" = spruce ] && [ -r /tmp/DevBridge-spruce-ui ] &&
+		pid=$(cat /tmp/DevBridge-spruce-ui 2>/dev/null) &&
+		case "$pid" in ''|*[!0-9]*) false ;; *) [ -e "/proc/$pid" ] ;; esac; then
+		printf 'devbridge\n'
 	# The screen saver stands in for the menu while it runs (launch.sh).
 	elif { pidof minui-list >/dev/null 2>&1 || [ -f /tmp/DevBridge-saver ]; } &&
 		[ -f /tmp/DevBridge-menu.json ]; then printf 'devbridge\n'
 	elif pidof netplay.elf >/dev/null 2>&1; then printf 'netplay\n'
 	elif pidof nextui.elf >/dev/null 2>&1; then printf 'nextui\n'
+	elif [ "$PLATFORM" = spruce ] && pidof MainUI >/dev/null 2>&1; then printf 'spruce\n'
 	else printf 'unknown\n'; fi
 }
 
 list_paks() {
 	kind=$1
+	if [ "$PLATFORM" = spruce ]; then
+		case "$kind" in
+			tools) root=$SPRUCE_APP_ROOT ;;
+			emus) root=$SPRUCE_EMU_ROOT ;;
+			*) fail "unknown pak kind" ;;
+		esac
+		for pak in "$root"/*; do
+			[ -d "$pak" ] && [ -f "$pak/config.json" ] || continue
+			name=$(basename "$pak")
+			printf '%s\t%s\n' "$name" "$pak"
+		done
+		return
+	fi
 	case "$kind" in
 		tools) root="$SDCARD_PATH/Tools/$PLATFORM" ;;
 		emus) root="$SDCARD_PATH/Emus/$PLATFORM" ;;
@@ -68,10 +87,14 @@ list_roms() {
 	for system_dir in "$SDCARD_PATH"/Roms/*; do
 		[ -d "$system_dir" ] || continue
 		tag=$(basename "$system_dir" | sed -n 's/.*(\([^()]\{1,16\}\))$/\1/p')
+		[ "$PLATFORM" != spruce ] || tag=$(basename "$system_dir")
 		[ -n "$tag" ] || continue
 		[ -z "$wanted" ] || [ "$tag" = "$wanted" ] || continue
 		find "$system_dir" -type f 2>/dev/null | while IFS= read -r rom; do
 			relative=${rom#"$SDCARD_PATH/Roms/"}
+			if [ "$PLATFORM" = spruce ]; then
+				case "$relative" in */Imgs/*|*/.gitkeep|*/.DS_Store) continue ;; esac
+			fi
 			printf '%s\t%s\n' "$tag" "$relative"
 		done
 	done
@@ -90,6 +113,17 @@ resolve_game() {
 		*) GAME_ROM="$SDCARD_PATH/Roms/$GAME_ROM" ;;
 	esac
 	[ -f "$GAME_ROM" ] || fail "ROM not found: $GAME_ROM"
+	if [ "$PLATFORM" = spruce ]; then
+		[ -f "$SPRUCE_EMU_ROOT/$GAME_TAG/config.json" ] || fail "emulator not found: $GAME_TAG"
+		# Keep /Emu/TAG/ in argv[0]: Spruce's shared launcher derives
+		# EMU_NAME from the invocation path before its /../ components.
+		GAME_LAUNCHER="$SPRUCE_EMU_ROOT/$GAME_TAG/../../spruce/scripts/emu/standard_launch.sh"
+		GAME_CORE=
+		GAME_STATES_DIR=
+		GAME_NAME=$(basename "$GAME_ROM")
+		GAME_STEM=${GAME_NAME%.*}
+		return
+	fi
 	GAME_LAUNCHER="$SDCARD_PATH/Emus/$PLATFORM/$GAME_TAG.pak/launch.sh"
 	if [ ! -f "$GAME_LAUNCHER" ]; then
 		GAME_LAUNCHER="$SDCARD_PATH/.system/$PLATFORM/paks/Emus/$GAME_TAG.pak/launch.sh"
@@ -109,6 +143,27 @@ resolve_game() {
 
 list_savestates() {
 	resolve_game "$1" "$2"
+	if [ "$PLATFORM" = spruce ]; then
+		states_root="$SDCARD_PATH/Saves/states"
+		[ -d "$states_root" ] || return 0
+		for state in "$states_root"/*/"$GAME_STEM".state \
+			"$states_root"/*/"$GAME_STEM".state[0-9] \
+			"$states_root"/*/"$GAME_STEM".state.auto; do
+			[ -f "$state" ] || continue
+			case "$state" in */.gameswitcher/*) continue ;; esac
+			suffix=${state##*/"$GAME_STEM".state}
+			case "$suffix" in
+				'') slot=0 ;;
+				.[0-9]) slot=${suffix#.} ;;
+				.auto) slot=auto ;;
+				*) continue ;;
+			esac
+			bytes=$(wc -c < "$state" 2>/dev/null | tr -d ' ')
+			modified=$(date -r "$state" +%s 2>/dev/null)
+			printf '%s\t%s\t%s\t%s\n' "$slot" "$state" "${bytes:-0}" "${modified:-0}"
+		done
+		return 0
+	fi
 	[ -n "$GAME_CORE" ] || fail "cannot determine active core for $GAME_TAG"
 	[ -d "$GAME_STATES_DIR" ] || return 0
 	for state in "$GAME_STATES_DIR/$GAME_NAME".st[0-9] \
@@ -143,12 +198,19 @@ open_game() {
 	state_slot=${3:-}
 	resolve_game "$tag" "$rom"
 	if [ -n "$state_slot" ]; then
-		[ "$state_slot" = auto ] && state_slot=9
-		case "$state_slot" in [0-9]) ;; *) fail "invalid save-state slot: $state_slot" ;; esac
+		if [ "$state_slot" = auto ] && [ "$PLATFORM" != spruce ]; then state_slot=9; fi
+		case "$state_slot" in [0-9]|auto) ;; *) fail "invalid save-state slot: $state_slot" ;; esac
 		state_path=$(list_savestates "$tag" "$rom" | awk -F '\t' -v wanted="$state_slot" '$1 == wanted {print $2; exit}')
 		[ -n "$state_path" ] || fail "save state slot $state_slot not found for $rom"
 	fi
 	[ "$(foreground)" = devbridge ] || fail "open DevBridge on the device before launching"
+	if [ "$PLATFORM" = spruce ]; then
+		command="$(shell_quote "$BIN_DIR/spruce-game-launch")"
+		case "$state_slot" in ''|auto) : ;; *) command="$command --state $(shell_quote "$state_slot")" ;; esac
+		command="$command $(shell_quote "$GAME_LAUNCHER") $(shell_quote "$GAME_ROM")"
+		queue_request "$command"
+		return
+	fi
 	command="$(shell_quote "$BIN_DIR/game-launch")"
 	[ -z "$state_slot" ] || command="$command --state $(shell_quote "$state_slot")"
 	command="$command $(shell_quote "$GAME_LAUNCHER") $(shell_quote "$GAME_ROM")"
@@ -157,14 +219,25 @@ open_game() {
 
 open_pak() {
 	requested=$1
-	case "$requested" in
-		/*) pak=$requested ;;
-		*.pak) pak="$SDCARD_PATH/Tools/$PLATFORM/$requested" ;;
-		*) pak="$SDCARD_PATH/Tools/$PLATFORM/$requested.pak" ;;
-	esac
+	if [ "$PLATFORM" = spruce ]; then
+		case "$requested" in
+			/*) pak=$requested ;;
+			*) pak="$SPRUCE_APP_ROOT/$requested" ;;
+		esac
+	else
+		case "$requested" in
+			/*) pak=$requested ;;
+			*.pak) pak="$SDCARD_PATH/Tools/$PLATFORM/$requested" ;;
+			*) pak="$SDCARD_PATH/Tools/$PLATFORM/$requested.pak" ;;
+		esac
+	fi
 	[ -d "$pak" ] && [ -f "$pak/launch.sh" ] || fail "pak not found: $requested"
 	[ "$(foreground)" = devbridge ] || fail "open DevBridge on the device before launching"
-	command="$(shell_quote "$BIN_DIR/game-launch") $(shell_quote "$pak/launch.sh")"
+	if [ "$PLATFORM" = spruce ]; then
+		command="$(shell_quote "$BIN_DIR/spruce-game-launch") $(shell_quote "$pak/launch.sh")"
+	else
+		command="$(shell_quote "$BIN_DIR/game-launch") $(shell_quote "$pak/launch.sh")"
+	fi
 	queue_request "$command"
 }
 
@@ -194,6 +267,9 @@ perf_sample() {
 	temp=$(cat /sys/devices/virtual/thermal/thermal_zone0/temp 2>/dev/null)
 	printf 'cpu_temp_millideg=%s\n' "$temp"
 	pid=$(pidof minarch.elf 2>/dev/null | awk '{print $1}')
+	if [ -z "$pid" ] && [ "$PLATFORM" = spruce ]; then
+		pid=$(pgrep -f '^/mnt/SDCARD/RetroArch/ra' 2>/dev/null | head -1)
+	fi
 	[ -n "$pid" ] || pid=$(pidof drastic 2>/dev/null | awk '{print $1}')
 	[ -n "$pid" ] || pid=$(pidof dsperate 2>/dev/null | awk '{print $1}')
 	printf 'game_pid=%s\n' "$pid"
@@ -202,6 +278,21 @@ perf_sample() {
 		printf 'game_utime_ticks=%s\ngame_stime_ticks=%s\n' "${14:-}" "${15:-}"
 		printf 'game_rss_kb=%s\n' "$(awk '/VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null)"
 	fi
+}
+
+quit_game() {
+	[ "$PLATFORM" = spruce ] || fail "quit-game is only available on Spruce"
+	pid=$(pgrep -f '^/mnt/SDCARD/RetroArch/ra' 2>/dev/null | head -1)
+	[ -n "$pid" ] || fail "RetroArch is not running"
+	ra_bin=$(tr '\0' '\n' < "/proc/$pid/cmdline" | head -1)
+	case "$ra_bin" in /mnt/SDCARD/RetroArch/ra*) : ;; *) fail "cannot determine RetroArch binary" ;; esac
+	# RetroArch may close its command socket before replying to QUIT. The
+	# process exit is the reliable acknowledgement for this command.
+	"$BIN_DIR/spruce-ra-command" QUIT >/dev/null 2>&1 || {
+		sleep 0.2
+		kill -0 "$pid" 2>/dev/null && fail "RetroArch quit command failed"
+	}
+	printf 'ok=quit\n'
 }
 
 command=$(printf '%s' "${1:-hello}" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
@@ -226,9 +317,18 @@ case "$command" in
 	open-game) [ $# -eq 2 ] || fail "usage: open-game TAG ROM"; open_game "$1" "$2" ;;
 	open-game-state) [ $# -eq 3 ] || fail "usage: open-game-state TAG ROM SLOT"; open_game "$1" "$2" "$3" ;;
 	open-pak) [ $# -eq 1 ] || fail "usage: open-pak NAME_OR_PATH"; open_pak "$1" ;;
+	quit-game) quit_game ;;
 	screen) screen_capture ;;
 	perf) perf_sample ;;
-	keep-screen-on) touch /tmp/stay_awake; printf 'ok=devbridge-ui-holds-autosleep\n' ;;
+	keep-screen-on)
+		if [ "$PLATFORM" = spruce ]; then
+			killall -q idlemon 2>/dev/null || true
+			killall -q idle_watchdog.sh 2>/dev/null || true
+			printf 'ok=screen-awake\n'
+		else
+			touch /tmp/stay_awake
+			printf 'ok=devbridge-ui-holds-autosleep\n'
+		fi ;;
 	terminal) [ $# -gt 0 ] || fail "usage: terminal COMMAND"; exec /bin/sh -c "$*" ;;
 	*) fail "unknown command: $command" ;;
 esac

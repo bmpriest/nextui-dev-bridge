@@ -1,0 +1,7 @@
+{
+  "label": "DevBridge",
+  "icon": "devbridge.png",
+  "launch": "launch.sh",
+  "description": "SSH and remote development tools",
+  "hideInSimpleMode": true
+}

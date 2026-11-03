@@ -1,0 +1,54 @@
+#!/bin/sh
+# Run a Spruce app or emulator through its own launcher, preserving $0 so the
+# shared emulator script can infer its Emu tag from the launcher path.
+slot=
+if [ "$1" = --state ]; then
+    slot=$2
+    shift 2
+fi
+launcher=$1
+shift
+case "$launcher" in
+    /mnt/SDCARD/App/*/launch.sh|/mnt/SDCARD/Emu/*/../../spruce/scripts/emu/standard_launch.sh|/tmp/*/launch.sh) ;;
+    *) printf 'error=unsupported Spruce launcher: %s\n' "$launcher" >&2; exit 1 ;;
+esac
+[ -f "$launcher" ] || exit 1
+if [ -z "$slot" ]; then exec "$launcher" "$@"; fi
+
+# Spruce performs substantial RetroArch setup in its shared launcher. Start it
+# normally, then ask RetroArch's documented network command interface to load
+# the requested state slot once its core is running.
+"$launcher" "$@" &
+launch_pid=$!
+trap 'kill "$launch_pid" 2>/dev/null || true' EXIT INT TERM HUP
+tries=0
+loaded=0
+while [ "$tries" -lt 50 ]; do
+    ra_pid=$(pgrep -f '^/mnt/SDCARD/RetroArch/ra' 2>/dev/null | head -1)
+    if [ -n "$ra_pid" ]; then
+        ra_bin=$(tr '\0' '\n' < "/proc/$ra_pid/cmdline" | head -1)
+        case "$ra_bin" in /mnt/SDCARD/RetroArch/ra*) : ;; *) ra_bin= ;; esac
+        if [ -n "$ra_bin" ] &&
+            "$(dirname "$0")/spruce-ra-command" GET_STATUS >/dev/null 2>&1; then
+            if "$(dirname "$0")/spruce-ra-command" LOAD_STATE_SLOT "$slot"; then
+                loaded=1
+                break
+            fi
+        fi
+    fi
+    kill -0 "$launch_pid" 2>/dev/null || break
+    sleep 0.2
+    tries=$((tries + 1))
+done
+if [ "$loaded" != 1 ]; then
+    printf 'error=Spruce RetroArch did not load state slot %s\n' "$slot" >&2
+    [ -z "$ra_pid" ] || kill "$ra_pid" 2>/dev/null || true
+    kill "$launch_pid" 2>/dev/null || true
+    wait "$launch_pid" 2>/dev/null || true
+    trap - EXIT INT TERM HUP
+    exit 1
+fi
+wait "$launch_pid"
+rc=$?
+trap - EXIT INT TERM HUP
+exit "$rc"

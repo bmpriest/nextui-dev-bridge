@@ -5,10 +5,7 @@ PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
 PAK_NAME=$(basename "$PAK_DIR")
 PAK_NAME=${PAK_NAME%.pak}
 
-: "${SDCARD_PATH:=/mnt/SDCARD}"
-: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
-: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
-: "${LOGS_PATH:=$USERDATA_PATH/logs}"
+. "$BIN_DIR/paths.sh"
 
 STATE="$USERDATA_PATH/$PAK_NAME"
 LOG="$LOGS_PATH/$PAK_NAME.service.txt"
@@ -41,8 +38,8 @@ fi
 
 # NextUI's h700 platform reads raw evdev codes rather than TrimUI's SDL
 # layout, so the virtual pad has to speak ANBERNIC-keys' codes there.
-case "$PLATFORM" in
-	h700) export DEVBRIDGE_INPUT_LAYOUT=h700 ;;
+case "$PLATFORM:$SPRUCE_PLATFORM" in
+	h700:*|spruce:Anbernic*) export DEVBRIDGE_INPUT_LAYOUT=h700 ;;
 esac
 
 rm -f "$INPUT_SOCKET"

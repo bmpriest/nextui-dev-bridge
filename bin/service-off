@@ -7,9 +7,7 @@ PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
 PAK_NAME=$(basename "$PAK_DIR")
 PAK_NAME="${PAK_NAME%.pak}"
 
-: "${SDCARD_PATH:=/mnt/SDCARD}"
-: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
-: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
+. "$BIN_DIR/paths.sh"
 : "${LOGS_PATH:=$USERDATA_PATH/logs}"
 
 STATE="$USERDATA_PATH/$PAK_NAME"

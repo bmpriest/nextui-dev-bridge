@@ -1,0 +1,20 @@
+#!/bin/sh
+# Send one RetroArch network command and require its acknowledgement.
+. /mnt/SDCARD/spruce/scripts/helperFunctions.sh || exit 1
+python=$(get_python_path) || exit 1
+"$python" -c '
+import socket
+import sys
+command = sys.argv[1]
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(2)
+try:
+    sock.sendto(command.encode("ascii"), ("127.0.0.1", 55355))
+    reply = sock.recvfrom(4096)[0].decode("utf-8", "replace").strip()
+except (OSError, UnicodeError) as exc:
+    print(f"error={exc}", file=sys.stderr)
+    sys.exit(1)
+print(reply)
+if not reply.startswith(command.split(" ", 1)[0]):
+    sys.exit(1)
+' "$*"

@@ -1,0 +1,131 @@
+#!/bin/sh
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+. "$BIN_DIR/paths.sh"
+. "$BIN_DIR/devbridge.sh" || exit 1
+STATE="$USERDATA_PATH/DevBridge"
+LOG="$LOGS_PATH/DevBridge.txt"
+MENU=/tmp/DevBridge-spruce-menu.json
+ACTION=/tmp/DevBridge-spruce-action
+SELECTION="$SDCARD_PATH/App/PyUI/selection.txt"
+UI_MARKER=/tmp/DevBridge-spruce-ui
+mkdir -p "$STATE" "$LOGS_PATH"
+
+# Spruce's launcher selects the display and controller backend for each device.
+. "$SDCARD_PATH/spruce/scripts/helperFunctions.sh" || exit 1
+PLATFORM=spruce
+export PLATFORM
+# Spruce's bundled apps stop these idle timers while they own the display.
+# principal.sh restarts the watchdog after the app returns.
+killall -q idlemon 2>/dev/null || true
+killall -q idle_watchdog.sh 2>/dev/null || true
+terminate_tree() {
+    for child in $(pgrep -P "$1" 2>/dev/null); do terminate_tree "$child"; done
+    kill "$1" 2>/dev/null || true
+}
+cleanup() {
+    [ -z "${UI_PID:-}" ] || terminate_tree "$UI_PID"
+    rm -f "$MENU" "$ACTION" "$UI_MARKER"
+}
+trap cleanup EXIT INT TERM HUP QUIT
+printf '%s\n' "$$" > "$UI_MARKER"
+
+input_running() {
+    [ -S /tmp/DevBridge-input.sock ] && [ -r "$STATE/input.pid" ] || return 1
+    pid=$(cat "$STATE/input.pid" 2>/dev/null)
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF "$(arch_bin devbridge-input)"
+}
+beacon_running() {
+    [ -r "$STATE/beacon.pid" ] || return 1
+    pid=$(cat "$STATE/beacon.pid" 2>/dev/null)
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -e "/proc/$pid" ]
+}
+enabled() { input_running || bundled_ssh_running; }
+toggle_beacon() {
+    if [ -f "$STATE/beacon-enabled" ]; then
+        rm -f "$STATE/beacon-enabled"
+        pid=$(cat "$STATE/beacon.pid" 2>/dev/null)
+        case "$pid" in ''|*[!0-9]*) : ;; *) kill "$pid" 2>/dev/null || true ;; esac
+        rm -f "$STATE/beacon.pid"
+    else
+        touch "$STATE/beacon-enabled"
+        if enabled; then "$BIN_DIR/beacon.sh" >> "$LOG" 2>&1 & fi
+    fi
+}
+build_menu() {
+    if enabled; then bridge=Enabled; toggle=Disable; else bridge=Disabled; toggle=Enable; fi
+    provider=$(ssh_provider)
+    case "$provider" in
+        system) ssh="Spruce:$(ssh_service_port)" ;;
+        bundled) ssh="DevBridge:$(ssh_service_port)" ;;
+        *) ssh=Off ;;
+    esac
+    if sftp_available; then sftp=Ready; else sftp=Unavailable; fi
+    if input_running; then input=Ready; else input=Off; fi
+    if [ -f "$STATE/beacon-enabled" ]; then
+        if beacon_running; then beacon=Broadcasting; else beacon='Enabled (idle)'; fi
+    else beacon=Off; fi
+    address=$(ip_address 2>/dev/null || true); [ -n "$address" ] || address='No network'
+    host=$(device_hostname 2>/dev/null || true); [ -n "$host" ] || host=Unknown
+    battery=$(battery_percent 2>/dev/null || true); [ -n "$battery" ] || battery=Unknown
+    power=$(charge_status 2>/dev/null || true); [ -n "$power" ] || power=Unknown
+    jq -n \
+      --arg toggle "$toggle DevBridge" --arg bridge "DevBridge: $bridge" \
+      --arg ssh "SSH: $ssh" --arg sftp "SFTP: $sftp" \
+      --arg input "Input: $input" --arg address "Address: $address" \
+      --arg host "Host: $host" --arg battery "Battery: $battery" \
+      --arg power "Power: $power" --arg beacon "Discovery: $beacon" \
+      --arg updated "Updated: $(date '+%H:%M:%S')" \
+      '{($toggle): "printf toggle > /tmp/DevBridge-spruce-action",
+        "Discovery beacon": "printf beacon > /tmp/DevBridge-spruce-action",
+        "Refresh status": "printf refresh > /tmp/DevBridge-spruce-action",
+        ($bridge): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($ssh): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($sftp): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($input): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($address): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($host): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($battery): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($power): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($beacon): "printf refresh > /tmp/DevBridge-spruce-action",
+        ($updated): "printf refresh > /tmp/DevBridge-spruce-action"}' > "$MENU"
+}
+while :; do
+    build_menu || exit 1
+    rm -f "$ACTION" "$SELECTION"
+    rc_file=/tmp/DevBridge-spruce-ui.rc
+    rm -f "$rc_file"
+    {
+        "$SDCARD_PATH/App/PyUI/launch.sh" -optionListFile "$MENU" \
+            -optionListTitle DevBridge >> "$LOG" 2>&1
+        printf '%s\n' "$?" > "$rc_file"
+    } &
+    ui_pid=$!
+    UI_PID=$ui_pid
+    while [ ! -f "$rc_file" ] && [ ! -f /tmp/DevBridge-request ]; do
+        sleep 0.2
+    done
+    if [ -f /tmp/DevBridge-request ]; then
+        terminate_tree "$ui_pid"
+        wait "$ui_pid" 2>/dev/null || true
+        UI_PID=
+        request=$(cat /tmp/DevBridge-request 2>/dev/null)
+        rm -f /tmp/DevBridge-request "$rc_file"
+        if [ -n "$request" ]; then /bin/sh -c "$request" >> "$LOG" 2>&1; fi
+        continue
+    fi
+    wait "$ui_pid" 2>/dev/null || true
+    UI_PID=
+    rm -f "$rc_file"
+    case "$(cat "$ACTION" 2>/dev/null)" in
+        toggle)
+            if enabled; then "$BIN_DIR/service-off" >> "$LOG" 2>&1
+            else "$BIN_DIR/service-on" >> "$LOG" 2>&1; fi ;;
+        beacon) toggle_beacon ;;
+        refresh) : ;;
+        *) break ;;
+    esac
+done

@@ -303,28 +303,38 @@ out=$(SSH_ORIGINAL_COMMAND="echo plain command" "$FIXTURE/wrapper/shell-wrapper.
 	[ "$PATH" = "$path_once" ] && [ "$LD_LIBRARY_PATH" = "$ld_once" ]
 	set_cpu_auto
 	[ "$(cat "$FIXTURE/governor-mode")" = auto ]
+	printf 'keep-this-line\ntest DevBridge.pak-on-boot\n' > "$USERDATA_PATH/auto.sh"
+	retire_legacy_boot_hook
+	[ "$(cat "$USERDATA_PATH/auto.sh")" = keep-this-line ]
 
 	PATH="$FIXTURE/stub:/usr/bin:/bin"
 
 	menu=$(build_menu)
-	jq -e '.items[] | select(.name == "Status:") | .options[0] == "Stopped"' "$menu" >/dev/null
+	jq -e '.items[] | select(.name == "DevBridge:") | .options[0] == "Disabled"' "$menu" >/dev/null
+	jq -e '.items[] | select(.name == "SSH provider:") | .options[0] == "Stopped"' "$menu" >/dev/null
 	jq -e '.items[] | select(.name == "Address:") | .options[0] == "192.168.0.166"' "$menu" >/dev/null
 	jq -e '.items[] | select(.name == "Battery:") | .options[0] == "64%"' "$menu" >/dev/null
 	jq -e '.items[] | select(.name == "Power:") | .options[0] == "Discharging"' "$menu" >/dev/null
-	jq -e '.items[] | select(.name == "Start DevBridge") | .features.unselectable == false' "$menu" >/dev/null
+	jq -e '.items[] | select(.name == "Enable DevBridge") | .features.unselectable == false' "$menu" >/dev/null
+	! jq -e '.items[] | select(.name | startswith("Start on boot:"))' "$menu" >/dev/null
 	jq -e '.items[] | select(.name == "Discovery beacon: Off")' "$menu" >/dev/null
 	# Status rows must never be selectable or the cursor would land on them.
 	jq -e '.items[] | select(.name == "Battery:") | .features.unselectable' "$menu" >/dev/null
 
-	# A system provider is displayed as adopted and has no destructive stop
-	# action. SFTP is reported from the firmware's configured subsystem.
+	# A system provider remains adopted while DevBridge's own service can be
+	# enabled or disabled independently.
 	touch "$FIXTURE/stub/port-22-up"
 	export SSHD_CONFIG_GLOB="$FIXTURE/ssh/sshd_config"
 	sed -i "s#missing-sftp-server#sftp-server#" "$FIXTURE/ssh/sshd_config"
 	menu=$(build_menu)
-	jq -e '.items[] | select(.name == "Status:") | .options[0] == "System SSH"' "$menu" >/dev/null
+	jq -e '.items[] | select(.name == "SSH provider:") | .options[0] == "System SSH"' "$menu" >/dev/null
 	jq -e '.items[] | select(.name == "SFTP:") | .options[0] == "sftp://root@192.168.0.166"' "$menu" >/dev/null
-	! jq -e '.items[] | select(.name == "Stop DevBridge")' "$menu" >/dev/null
+	jq -e '.items[] | select(.name == "Enable DevBridge")' "$menu" >/dev/null
+	devbridge_enabled() { return 0; }
+	menu=$(build_menu)
+	jq -e '.items[] | select(.name == "Disable DevBridge")' "$menu" >/dev/null
+	jq -e '.items[] | select(.name == "SSH provider:") | .options[0] == "System SSH"' "$menu" >/dev/null
+	devbridge_enabled() { return 1; }
 	rm -f "$FIXTURE/stub/port-22-up"
 	unset SSHD_CONFIG_GLOB
 	menu=$(build_menu)
@@ -332,7 +342,7 @@ out=$(SSH_ORIGINAL_COMMAND="echo plain command" "$FIXTURE/wrapper/shell-wrapper.
 	# The cursor defaults to the first actionable row, which is the service
 	# toggle rather than any of the status rows above it.
 	action_index=$(first_action_index "$menu")
-	[ "$(jq -r --argjson i "$action_index" '.items[$i].name' "$menu")" = "Start DevBridge" ]
+	[ "$(jq -r --argjson i "$action_index" '.items[$i].name' "$menu")" = "Enable DevBridge" ]
 
 	# A long-lived list is terminated by a state change and reported as a redraw.
 	printf '#!/bin/sh\nsleep 30\n' > "$FIXTURE/stub/minui-list"
@@ -373,17 +383,19 @@ out=$(SSH_ORIGINAL_COMMAND="echo plain command" "$FIXTURE/wrapper/shell-wrapper.
 		case "$1" in --write-location) loc="$2"; shift ;; esac
 		shift
 	done
-	[ -n "$loc" ] && printf '%s\n' "Start DevBridge" > "$loc"
+	[ -n "$loc" ] && printf '%s\n' "Enable DevBridge" > "$loc"
 	exit 0
 	STUB
 	chmod +x "$FIXTURE/stub/minui-list"
 	rc=0
 	out=$(main_screen "$menu") || rc=$?
 	[ "$rc" -eq 0 ]
-	[ "$out" = "Start DevBridge" ]
+	[ "$out" = "Enable DevBridge" ]
 	remember_selection "$menu" "$out"
-	[ "$LAST_SELECTED" = "$(jq -r '[.items[] | .name] | index("Start DevBridge")' "$menu")" ]
+	[ "$LAST_SELECTED" = "$(jq -r '[.items[] | .name] | index("Enable DevBridge")' "$menu")" ]
 )
+
+[ ! -e "$DIR/bin/on-boot" ]
 
 jq -e '.platforms == ["my282", "tg5040", "my285", "h700"]' "$DIR/pak.json" >/dev/null
 jq -e '.launch == "launch.sh"' "$DIR/pak.json" >/dev/null

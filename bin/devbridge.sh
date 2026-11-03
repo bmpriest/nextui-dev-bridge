@@ -143,6 +143,12 @@ dropbear_sftp_target() {
 }
 
 system_sftp_available() {
+	if [ "${PLATFORM:-}" = spruce ] &&
+		[ -x "$SDCARD_PATH/spruce/bin/SSH/dropbear-wrapper.sh" ] &&
+		{ [ -x "$SDCARD_PATH/spruce/bin64/gesftpserver" ] ||
+		  [ -x "$SDCARD_PATH/spruce/bin/gesftpserver" ]; }; then
+		return 0
+	fi
 	dropbear_sftp_target >/dev/null 2>&1 && ! bundled_ssh_running && return 0
 	target=$(openssh_sftp_target 2>/dev/null) || return 1
 	case "$target" in

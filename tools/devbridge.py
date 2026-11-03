@@ -215,6 +215,8 @@ class Device:
 
     @property
     def protocol_path(self):
+        if self.platform == "spruce":
+            return "/mnt/SDCARD/App/DevBridge/bin/protocol"
         return f"/mnt/SDCARD/Tools/{self.platform}/DevBridge.pak/bin/protocol"
 
 
@@ -301,12 +303,15 @@ class Runner:
         """
         listing = self.transport.run(
             device,
-            "for p in /mnt/SDCARD/Tools/*/DevBridge.pak/bin/protocol; do "
+            "for p in /mnt/SDCARD/Tools/*/DevBridge.pak/bin/protocol "
+            "/mnt/SDCARD/App/DevBridge/bin/protocol; do "
             "[ -f \"$p\" ] && echo \"$p\"; done",
             check=False,
         )
         found = [line.split("/")[4] for line in listing.stdout.splitlines()
                  if line.startswith("/mnt/SDCARD/Tools/")]
+        if "/mnt/SDCARD/App/DevBridge/bin/protocol" in listing.stdout.splitlines():
+            found.append("spruce")
         if len(found) == 1:
             return found[0]
         if self.args.platform in found or not found:
@@ -477,6 +482,13 @@ class Runner:
         self.wait_for(devices, "game", self.args.launch_timeout * 1000)
 
     def quit_game(self, devices):
+        spruce = [device for device in devices if device.platform == "spruce"]
+        for device in spruce:
+            result = self.protocol(device, "quit-game")
+            print(f"{device.alias}: {result.stdout.strip()}")
+        devices = [device for device in devices if device.platform != "spruce"]
+        if not devices:
+            return
         # Current MinArch's main menu has Continue, Save, Load, Options, Quit.
         self.input_action(devices, ["menu", "120"])
         time.sleep(0.5)

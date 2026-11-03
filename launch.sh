@@ -6,8 +6,11 @@ PAK_NAME=${PAK_NAME%.pak}
 
 cd "$PAK_DIR" || exit 1
 
-: "${SDCARD_PATH:=/mnt/SDCARD}"
-: "${PLATFORM:=$(basename "$(dirname "$PAK_DIR")")}"
+. "$PAK_DIR/bin/paths.sh"
+
+if [ "$PLATFORM" = spruce ]; then
+	exec "$PAK_DIR/bin/spruce-launch" "$@"
+fi
 
 if [ "$PLATFORM" = "tg3040" ]; then
 	: "${DEVICE:=brick}"
@@ -15,8 +18,6 @@ if [ "$PLATFORM" = "tg3040" ]; then
 	export PLATFORM=tg5040
 fi
 
-: "${USERDATA_PATH:=$SDCARD_PATH/.userdata/$PLATFORM}"
-: "${LOGS_PATH:=$USERDATA_PATH/logs}"
 : "${SYSTEM_PATH:=$SDCARD_PATH/.system/$PLATFORM}"
 
 architecture=arm
@@ -26,7 +27,6 @@ HUMAN_READABLE_NAME="DevBridge"
 STATE="$USERDATA_PATH/$PAK_NAME"
 LOG_FILE="$LOGS_PATH/$PAK_NAME.txt"
 BIN_DIR="$PAK_DIR/bin"
-AUTO_SH="$USERDATA_PATH/auto.sh"
 BEACON_FLAG="$STATE/beacon-enabled"
 SELECTION_FILE="/tmp/${PAK_NAME}-selection.out"
 REQUEST_FILE="/tmp/${PAK_NAME}-request"
@@ -108,6 +108,16 @@ service_provider() {
 	ssh_provider
 }
 
+devbridge_enabled() {
+	bundled_ssh_running && return 0
+	[ -S /tmp/DevBridge-input.sock ] && [ -r "$STATE/input.pid" ] || return 1
+	input_pid=$(cat "$STATE/input.pid" 2>/dev/null)
+	case "$input_pid" in ''|*[!0-9]*) return 1 ;; esac
+	[ -r "/proc/$input_pid/cmdline" ] || return 1
+	tr '\0' ' ' < "/proc/$input_pid/cmdline" 2>/dev/null |
+		grep -qF "$(arch_bin devbridge-input)"
+}
+
 beacon_enabled() {
 	[ -f "$BEACON_FLAG" ]
 }
@@ -117,26 +127,6 @@ beacon_running() {
 	pid=$(cat "$STATE/beacon.pid" 2>/dev/null)
 	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
 	[ -e "/proc/$pid" ]
-}
-
-will_start_on_boot() {
-	grep -q "${PAK_NAME}.pak-on-boot" "$AUTO_SH" 2>/dev/null
-}
-
-enable_start_on_boot() {
-	if [ ! -f "$AUTO_SH" ]; then
-		printf '#!/bin/sh\n\n' > "$AUTO_SH"
-	fi
-	printf 'test -f "$SDCARD_PATH/Tools/$PLATFORM/%s.pak/bin/on-boot" && "$SDCARD_PATH/Tools/$PLATFORM/%s.pak/bin/on-boot" & # %s.pak-on-boot\n' \
-		"$PAK_NAME" "$PAK_NAME" "$PAK_NAME" >> "$AUTO_SH"
-	chmod +x "$AUTO_SH"
-	sync
-}
-
-disable_start_on_boot() {
-	[ -f "$AUTO_SH" ] || return 0
-	sed -i "/${PAK_NAME}.pak-on-boot/d" "$AUTO_SH"
-	sync
 }
 
 sanitize() {
@@ -162,7 +152,7 @@ state_token() {
 		"$(connection_address 2>/dev/null)" \
 		"$(battery_percent 2>/dev/null)" \
 		"$(charge_status 2>/dev/null)" \
-		"$(will_start_on_boot && echo boot || echo noboot)" \
+		"$(devbridge_enabled && echo enabled || echo disabled)" \
 		"$(beacon_enabled && echo beacon || echo nobeacon)"
 }
 
@@ -171,11 +161,16 @@ build_menu() {
 	menu="/tmp/${PAK_NAME}-menu.json"
 	rm -f "$MENU_ROWS" "$menu"
 
+	if devbridge_enabled; then
+		add_row "DevBridge:" "Enabled"
+	else
+		add_row "DevBridge:" "Disabled"
+	fi
 	provider=$(service_provider)
 	case "$provider" in
-		system) add_row "Status:" "System SSH" ;;
-		bundled) add_row "Status:" "DevBridge SSH" ;;
-		*) add_row "Status:" "Stopped" ;;
+		system) add_row "SSH provider:" "System SSH" ;;
+		bundled) add_row "SSH provider:" "DevBridge SSH" ;;
+		*) add_row "SSH provider:" "Stopped" ;;
 	esac
 
 	address=$(connection_address 2>/dev/null)
@@ -219,12 +214,11 @@ build_menu() {
 	add_row "Updated:" "$(date '+%H:%M:%S' 2>/dev/null || echo '')"
 	add_row " " ""
 
-	if [ "$provider" = bundled ]; then
-		add_row "Stop DevBridge" "" 1
-	elif [ "$provider" = none ]; then
-		add_row "Start DevBridge" "" 1
+	if devbridge_enabled; then
+		add_row "Disable DevBridge" "" 1
+	else
+		add_row "Enable DevBridge" "" 1
 	fi
-	add_row "Start on boot: $(will_start_on_boot && echo On || echo Off)" "" 1
 	add_row "Discovery beacon: $(beacon_enabled && echo On || echo Off)" "" 1
 
 	jq -Rsc '
@@ -364,14 +358,13 @@ stop_service() {
 	"$BIN_DIR/service-off" >/dev/null 2>&1
 }
 
-toggle_boot() {
-	if will_start_on_boot; then
-		disable_start_on_boot
-		log "start on boot disabled"
-	else
-		enable_start_on_boot
-		log "start on boot enabled"
+retire_legacy_boot_hook() {
+	legacy_auto="$USERDATA_PATH/auto.sh"
+	if [ -f "$legacy_auto" ] &&
+		grep -q "${PAK_NAME}.pak-on-boot" "$legacy_auto" 2>/dev/null; then
+		sed -i "/${PAK_NAME}.pak-on-boot/d" "$legacy_auto"
 	fi
+	rm -f "$BIN_DIR/on-boot"
 }
 
 toggle_beacon() {
@@ -384,7 +377,7 @@ toggle_beacon() {
 
 	touch "$BEACON_FLAG"
 	log "discovery beacon enabled"
-	if service_running && ! beacon_running; then
+	if devbridge_enabled && ! beacon_running; then
 		"$BIN_DIR/beacon.sh" >> "$LOG_FILE" 2>&1 &
 	fi
 }
@@ -408,6 +401,7 @@ cleanup() {
 main() {
 	trap cleanup EXIT INT TERM HUP QUIT
 	rm -f "$SAVER_FILE"
+	retire_legacy_boot_hook
 	set_cpu_auto
 	hold_screen_awake
 
@@ -419,7 +413,7 @@ main() {
 
 	for executable in "$BIN_DIR/$PLATFORM/minui-list" "$BIN_DIR/$PLATFORM/jq" \
 		"$BIN_DIR/service-on" "$BIN_DIR/service-off" \
-		"$BIN_DIR/service-is-running" "$BIN_DIR/on-boot" \
+		"$BIN_DIR/service-is-running" \
 		"$BIN_DIR/input" "$BIN_DIR/input-on" \
 		"$BIN_DIR/protocol" "$BIN_DIR/game-launch" \
 		"$BIN_DIR/shell-wrapper.sh" "$BIN_DIR/beacon.sh" \
@@ -427,8 +421,6 @@ main() {
 		"$BIN_DIR/$architecture/gesftpserver"; do
 		chmod +x "$executable" 2>/dev/null || true
 	done
-	"$BIN_DIR/input-on"
-
 	log "$PAK_NAME started on $PLATFORM"
 
 	while :; do
@@ -454,9 +446,8 @@ main() {
 			0)
 				remember_selection "$menu" "$selection"
 				case "$selection" in
-					"Start DevBridge") start_service ;;
-					"Stop DevBridge") stop_service ;;
-					"Start on boot:"*) toggle_boot ;;
+					"Enable DevBridge") start_service ;;
+					"Disable DevBridge") stop_service ;;
 					"Discovery beacon:"*) toggle_beacon ;;
 				esac
 				;;

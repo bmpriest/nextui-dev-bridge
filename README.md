@@ -11,6 +11,38 @@ the screen awake while it is open, shows connection details and battery state
 live, and announces the device on the local network so its address does not
 have to be rediscovered after a DHCP lease change.
 
+## Spruce on RG35XXH
+
+The Spruce app is available at `App/DevBridge`. Copy `launch.sh`,
+`config.json`, `devbridge.png`, `bin/`, and `res/` into that directory on the SD
+card. Spruce shows DevBridge in its Apps menu. The screen uses Spruce's native
+PyUI option list, which selects the renderer and controller backend for each
+device and displays DevBridge in the top bar. The list shows service,
+SSH/SFTP, input, network, host, battery, power, and discovery status. Select
+**Enable DevBridge** or **Disable DevBridge** to change the managed service,
+**Discovery beacon** to toggle discovery, or **Refresh status** to re-read the
+status. Press **B** to return to Apps.
+Spruce's own SSH/SFTP server remains available when DevBridge is disabled.
+DevBridge state and logs are under `Saves/spruce/DevBridge`
+and `Saves/spruce/DevBridge.service.txt`.
+
+The device protocol reports `platform=spruce` and can list Spruce apps,
+emulators, and ROMs. The host client detects this install automatically:
+
+```sh
+DEVBRIDGE_PASSWORD=<spruce-password> python3 tools/devbridge.py \
+  --user spruce --connect <device-ip> exec STATUS
+```
+
+Spruce `OPEN_PAK` and `OPEN_GAME` use Spruce's own app and emulator launchers,
+then return to DevBridge. `GET_ROM_SAVESTATES` lists RetroArch states in
+`Saves/states`; `OPEN_GAME_STATE` loads a numbered slot through RetroArch's
+network command interface. The `auto` state uses Spruce's RetroArch automatic
+state loading. `QUIT_GAME` closes RetroArch and returns to the app.
+On H700 Spruce devices, button commands use Spruce's `sendevent` and built-in
+controller event path so they reach PyUI as well as games. Other Spruce devices
+continue to use DevBridge's virtual controller.
+
 It expands on the `SSH Server` pak, which manages Dropbear but leaves you to
 find the IP yourself, offers no SFTP, and shows no device state.
 
@@ -33,6 +65,8 @@ means relaunching it; the cursor returns to the row you last selected.
 
 The rows below the separator act immediately when selected rather than being
 edited and saved, so a redraw can never discard a half-made change.
+The Enable/Disable action controls DevBridge's own service. When firmware SSH
+is present, disabling DevBridge leaves that SSH server running.
 
 ## Keeping the screen on
 
@@ -172,7 +206,7 @@ provider without SFTP remains untouched while DevBridge uses port 2222.
 
 - `launch.sh` — the live status UI
 - `bin/devbridge.sh` — shared helpers (battery, PMU, network, beacon payload)
-- `bin/service-on` / `service-off` / `service-is-running` / `on-boot`
+- `bin/service-on` / `service-off` / `service-is-running`
 - `bin/shell-wrapper.sh` — Dropbear forced command, dispatches SFTP
 - `bin/beacon.sh` — multicast announcer
 - `bin/protocol` — typed device-side automation endpoint
