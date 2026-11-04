@@ -30,6 +30,13 @@ queue_request() {
 	printf 'ok=queued\n'
 }
 
+# RetroArch by process name (ra64.universal, ra64.h700, ...), the way Spruce's
+# own scripts find it: a wrapper such as Netplay's may run the real binary from
+# another path, but it keeps the name.
+spruce_ra_pid() {
+	pgrep 'ra[36][24]\.' 2>/dev/null | head -1 | grep .
+}
+
 foreground() {
 	if [ -n "${DEVBRIDGE_FOREGROUND:-}" ]; then
 		printf '%s\n' "$DEVBRIDGE_FOREGROUND"
@@ -37,7 +44,7 @@ foreground() {
 	fi
 	if pidof minarch.elf >/dev/null 2>&1; then printf 'game\n'
 	elif [ "$PLATFORM" = spruce ] &&
-		{ pidof retroarch >/dev/null 2>&1 || pgrep -f '^/mnt/SDCARD/RetroArch/ra' >/dev/null 2>&1; }; then
+		{ pidof retroarch >/dev/null 2>&1 || spruce_ra_pid >/dev/null; }; then
 		printf 'game\n'
 	elif pidof drastic >/dev/null 2>&1; then printf 'game\n'
 	elif pidof dsperate >/dev/null 2>&1; then printf 'game\n'
@@ -282,10 +289,7 @@ perf_sample() {
 
 quit_game() {
 	[ "$PLATFORM" = spruce ] || fail "quit-game is only available on Spruce"
-	pid=$(pgrep -f '^/mnt/SDCARD/RetroArch/ra' 2>/dev/null | head -1)
-	[ -n "$pid" ] || fail "RetroArch is not running"
-	ra_bin=$(tr '\0' '\n' < "/proc/$pid/cmdline" | head -1)
-	case "$ra_bin" in /mnt/SDCARD/RetroArch/ra*) : ;; *) fail "cannot determine RetroArch binary" ;; esac
+	pid=$(spruce_ra_pid) || fail "RetroArch is not running"
 	# RetroArch may close its command socket before replying to QUIT. The
 	# process exit is the reliable acknowledgement for this command.
 	"$BIN_DIR/spruce-ra-command" QUIT >/dev/null 2>&1 || {
