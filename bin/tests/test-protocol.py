@@ -64,11 +64,12 @@ class ProtocolTests(unittest.TestCase):
         device = module.Device("brick-serial", "brick", None, "tg5040", "adb")
         completed = types.SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
         with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
-            transport.run(device, "printf hello")
-            self.assertEqual(
-                run.call_args.args[0],
-                ["adb", "-s", "brick-serial", "shell", "sh -c 'printf hello'"],
-            )
+            with mock.patch.object(module.random, "getrandbits", return_value=0):
+                completed.stdout = "ok\n\n__DEVBRIDGE_EXIT_0000000000000000__=0\n"
+                transport.run(device, "printf hello")
+            self.assertEqual(run.call_args.args[0][:4], ["adb", "-s", "brick-serial", "shell"])
+            self.assertIn("printf hello", run.call_args.args[0][4])
+            self.assertIn("__DEVBRIDGE_EXIT_", run.call_args.args[0][4])
             transport.download(device, "/tmp/screen", Path("/tmp/local-screen"))
             self.assertEqual(
                 run.call_args.args[0],

@@ -147,7 +147,9 @@ class SSHTransport:
 
     def run(self, device, command: str, *, check=True, timeout=None):
         if device.transport == "adb":
-            argv = ["adb", "-s", device.address, "shell", f"sh -c {shlex.quote(command)}"]
+            exit_marker = f"__DEVBRIDGE_EXIT_{random.getrandbits(64):016x}__="
+            wrapped = f'(\n{command}\n)\n_devbridge_remote_rc=$?\nprintf \'\\n{exit_marker}%s\\n\' "$_devbridge_remote_rc"'
+            argv = ["adb", "-s", device.address, "shell", f"sh -c {shlex.quote(wrapped)}"]
             environment = os.environ.copy()
             start_new_session = False
             transport_name = "ADB"
@@ -170,6 +172,14 @@ class SSHTransport:
             raise ProtocolError(f"{device.alias}: {transport_name} command timed out") from error
         except FileNotFoundError as error:
             raise ProtocolError(f"{transport_name.lower()} executable not found") from error
+        if device.transport == "adb" and not result.returncode:
+            output, found, status = result.stdout.rpartition(exit_marker)
+            if found and status.strip().isdigit():
+                result.stdout = output.removesuffix("\n")
+                result.returncode = int(status.strip())
+            else:
+                result.returncode = 1
+                result.stderr += "ADB remote exit status missing"
         if check and result.returncode:
             detail = result.stderr.strip() or result.stdout.strip()
             raise ProtocolError(f"{device.alias}: remote command failed: {detail}")
@@ -473,6 +483,28 @@ class Runner:
         if pending:
             raise ProtocolError(f"timed out waiting for {expected}: {', '.join(pending)}")
 
+    def assert_state(self, devices, predicates, timeout_ms=0):
+        expected = key_values('\n'.join(predicates))
+        if not expected or len(expected) != len(predicates):
+            raise ProtocolError('state assertion requires unique KEY=VALUE predicates')
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            mismatches = {}
+            for device in devices:
+                result = self.protocol(device, 'status')
+                observed = key_values(result.stdout)
+                wrong = {key: {'expected': value, 'observed': observed.get(key)}
+                         for key, value in expected.items() if observed.get(key) != value}
+                self.record('state_assertion', device=device.alias,
+                            expected=expected, observed=observed, passed=not wrong)
+                if wrong:
+                    mismatches[device.alias] = wrong
+            if not mismatches:
+                return
+            if time.monotonic() >= deadline:
+                raise ProtocolError('state assertion failed: ' + json.dumps(mismatches))
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+
     def open_game(self, devices, tag: str, rom: str, state: str | None = None):
         for device in devices:
             command = "open-game-state" if state is not None else "open-game"
@@ -622,13 +654,15 @@ class Runner:
                     shot.unlink(missing_ok=True)
                 if score <= limit:
                     kept = best_shot.pop(alias, None)
+                    matched_path = None
                     if kept:
-                        kept.unlink(missing_ok=True)
+                        matched_path = self.session_dir / f"verify-pass-{expected.stem}-{alias}.png"
+                        kept.replace(matched_path)
                     print(f"{alias}: verified {expected.name} "
                           f"(difference {score:.2f}, attempt {index + 1})")
                     self.record("verify", device=alias, reference=str(expected),
                                 difference=round(score, 3), attempt=index + 1,
-                                matched=True)
+                                matched=True, path=str(matched_path) if matched_path else None)
                     del pending[alias]
             if not pending:
                 return
@@ -806,6 +840,30 @@ class Runner:
             self.verify(self.selected(prefix), arguments[0],
                         int(arguments[1]) if waiting else None,
                         options.get("threshold"), options.get("region"))
+        elif command == "IF_SCREEN":
+            # One observed screen condition; no implicit retry or unknown-error branch.
+            if "::" not in arguments:
+                raise ProtocolError("usage: IF_SCREEN REFERENCE [threshold=N] [region=X,Y,W,H] :: COMMAND...")
+            split = arguments.index("::")
+            head, shell = arguments[:split], arguments[split + 1:]
+            if not head or not shell:
+                raise ProtocolError("IF_SCREEN requires a reference and command")
+            reference = Path(head[0]).expanduser()
+            if not reference.is_file():
+                raise ProtocolError(f"VERIFY reference not found: {reference}")
+            options = verify_options(head[1:])
+            for device in self.selected(prefix):
+                matched = False
+                try:
+                    self.verify([device], str(reference), None, options.get("threshold"), options.get("region"))
+                    matched = True
+                except ProtocolError as error:
+                    if not str(error).startswith("screen does not match"):
+                        raise
+                self.record("branch", device=device.alias, condition="screen", reference=str(reference),
+                            matched=matched, action=shlex.join(shell) if matched else "skip")
+                if matched:
+                    self.protocol(device, "terminal", shlex.join(shell), check=True)
         elif command == "VERIFY_UNTIL":
             # VERIFY_UNTIL REFERENCE TIMEOUT_MS [every=MS] [threshold=N]
             #     [region=X,Y,W,H] :: SHELL COMMAND...
@@ -830,6 +888,8 @@ class Runner:
                     extras.append(extra)
             options = verify_options(extras)
             devices = self.selected(prefix)
+            if not Path(head[0]).expanduser().is_file():
+                raise ProtocolError(f"VERIFY reference not found: {head[0]}")
             deadline = time.monotonic() + int(head[1]) / 1000
             while True:
                 try:
@@ -842,7 +902,7 @@ class Runner:
                 shell_command = shlex.join(shell)
                 for device in devices:
                     print(f"{device.alias}: not yet; {shell_command}")
-                    self.protocol(device, "terminal", shell_command, check=False)
+                    self.protocol(device, "terminal", shell_command, check=True)
         elif command == "SCREEN":
             self.screenshot(self.selected(prefix), arguments[0] if arguments else None)
         elif command == "WAIT":
@@ -850,6 +910,12 @@ class Runner:
         elif command == "WAIT_FOR":
             timeout = int(arguments[1]) if len(arguments) > 1 else self.args.launch_timeout * 1000
             self.wait_for(self.selected(prefix), arguments[0].lower(), timeout)
+        elif command == 'ASSERT_STATE':
+            self.assert_state(self.selected(prefix), arguments)
+        elif command == 'WAIT_STATE':
+            if len(arguments) < 2:
+                raise ProtocolError('usage: WAIT_STATE TIMEOUT_MS KEY=VALUE...')
+            self.assert_state(self.selected(prefix), arguments[1:], int(arguments[0]))
         elif command == "PERF":
             duration = int(arguments[0]) if arguments else 10000
             interval = int(arguments[1]) if len(arguments) > 1 else 1000
