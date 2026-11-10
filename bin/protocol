@@ -263,6 +263,13 @@ screen_capture() {
 		fail "framebuffer capture failed"
 	printf 'path=%s\nwidth=%s\nheight=%s\nstride=%s\nformat=bgra\n' \
 		"$path" "$width" "$height" "$stride"
+	# The Miyoo A30's panel is mounted portrait: its 480x640 framebuffer
+	# holds the landscape picture turned a quarter left. The client turns
+	# it back, so A30 shots read like every other landscape device's.
+	if [ "$width" -lt "$height" ] &&
+		grep -qx 'MIYOO Pad1' /sys/class/input/event*/device/name 2>/dev/null; then
+		printf 'rotate=90\n'
+	fi
 }
 
 perf_sample() {

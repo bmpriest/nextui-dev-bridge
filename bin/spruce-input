@@ -3,15 +3,36 @@
 # with Spruce's sendevent utility. PyUI and RetroArch both read the built-in
 # pad (RetroArch as SDL joypad 0), so a separate uinput pad never reaches them.
 SEND=/mnt/SDCARD/spruce/bin64/sendevent
+# The A30 ships bin64 too, but its kernel is 32-bit: use spruce's arm build.
+uname -m | grep -q 64 || SEND=/mnt/SDCARD/spruce/bin/sendevent
 command=$1
 button=$2
 duration=${3:-80}
 
 # The built-in pad, found by name: ANBERNIC-keys on H700, TRIMUI Player1
-# (trimui_inputd's pad) on the Brick and other TrimUI devices.
+# (trimui_inputd's pad) on the Brick and other TrimUI devices. On the Miyoo
+# A30, MIYOO Pad1 is spruce's joypad daemon translating the gpio-keys-polled
+# keyboard (see RetroArch/platform/a30.button.mapping.nightmare.txt), so the
+# presses go into that keyboard as its own key codes.
 DEVICE=
 LAYOUT=
-for name_file in /sys/class/input/event*/device/name; do
+if grep -qx 'MIYOO Pad1' /sys/class/input/event*/device/name 2>/dev/null; then
+    for name_file in /sys/class/input/event*/device/name; do
+        [ "$(cat "$name_file" 2>/dev/null)" = gpio-keys-polled ] || continue
+        node=${name_file%/device/name}
+        DEVICE=/dev/input/${node##*/}
+        LAYOUT=miyoo
+        break
+    done
+fi
+# The Miyoo Mini family (spruce's MiyooMini: Mini Plus, Mini Flip; SigmaStar
+# SSD202): keyboard keys on event0, the node spruce's PyUI reads - the A30's
+# codes, but with its own shoulder buttons.
+if [ -z "$DEVICE" ] && grep -q SStar /proc/cpuinfo 2>/dev/null && [ -e /dev/input/event0 ]; then
+    DEVICE=/dev/input/event0
+    LAYOUT=mini
+fi
+[ -n "$DEVICE" ] || for name_file in /sys/class/input/event*/device/name; do
     case "$(cat "$name_file" 2>/dev/null)" in
         ANBERNIC-keys) LAYOUT=anbernic ;;
         'TRIMUI Player1') LAYOUT=trimui ;;
@@ -23,6 +44,7 @@ for name_file in /sys/class/input/event*/device/name; do
 done
 
 event_for() {
+    case "$LAYOUT" in miyoo|mini) miyoo_event_for "$1"; return ;; esac
     case "$1" in
         up) type=3; code=17; down=-1; return ;;
         down) type=3; code=17; down=1; return ;;
@@ -50,6 +72,7 @@ event_for() {
 # TRIMUI Player1's codes, as devbridge-input's trimui layout reports them:
 # B/A are BTN_SOUTH/EAST and the triggers are the ABS_Z/ABS_RZ axes.
 trimui_event_for() {
+    [ "$LAYOUT" = miyoo ] && { miyoo_event_for "$1"; return; }
     case "$1" in
         a) type=1; code=305; down=1 ;;
         b) type=1; code=304; down=1 ;;
@@ -67,6 +90,27 @@ trimui_event_for() {
         *) return 1 ;;
     esac
 }
+# gpio-keys-polled on the A30 (and event0 on the Mini): every control is a
+# keyboard key.
+miyoo_event_for() {
+    type=1; down=1
+    case "$1" in
+        up) code=103 ;; down) code=108 ;; left) code=105 ;; right) code=106 ;;
+        a) code=57 ;; b) code=29 ;; x) code=42 ;; y) code=56 ;;
+        l1) code=15 ;; r1) code=14 ;; l2) code=18 ;; r2) code=20 ;;
+        select) code=97 ;; start) code=28 ;; menu) code=1 ;;
+        l3|r3) [ "$command" = release-all ] && return 1
+               printf 'error no such button on this device\n' >&2; exit 1 ;;
+        *) printf 'error unknown button\n' >&2; exit 1 ;;
+    esac
+    # The Mini's shoulders, as spruce's PyUI maps them (miyoo_mini_common.py).
+    if [ "$LAYOUT" = mini ]; then
+        case "$1" in
+            l1) code=18 ;; r1) code=20 ;; l2) code=15 ;; r2) code=14 ;;
+        esac
+    fi
+    return 0
+}
 send_event() {
     printf '%s %s %s\n0 0 0\n' "$type" "$code" "$1" | "$SEND" "$DEVICE"
 }
@@ -76,7 +120,7 @@ case "$command" in
         printf 'ok ready\n' ;;
     release-all)
         for button in up down left right a b x y l1 r1 l2 r2 l3 r3 select start menu; do
-            event_for "$button"
+            event_for "$button" || continue
             send_event 0 || exit 1
         done
         printf 'ok\n' ;;

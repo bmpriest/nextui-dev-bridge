@@ -71,6 +71,15 @@ def verify_options(extras):
     return options
 
 
+def rotation_filter(info: dict) -> list[str]:
+    """ffmpeg arguments that turn a portrait-mounted panel's frame upright.
+    The device reports rotate=90 when its framebuffer holds the landscape
+    picture turned a quarter left (the Miyoo A30)."""
+    if info.get("rotate") == "90":
+        return ["-vf", "transpose=1"]
+    return []
+
+
 def key_values(text: str) -> dict[str, str]:
     result = {}
     for line in text.splitlines():
@@ -612,6 +621,7 @@ class Runner:
             ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo",
             "-pixel_format", info.get("format", "bgra"), "-video_size",
             f"{info['width']}x{info['height']}", "-i", str(raw),
+            *rotation_filter(info),
             "-frames:v", "1", "-update", "1", str(png),
         ], check=True)
         raw.unlink()
@@ -705,6 +715,7 @@ class Runner:
                     ffmpeg, "-loglevel", "error", "-y", "-f", "rawvideo",
                     "-pixel_format", info.get("format", "bgra"), "-video_size",
                     f"{info['width']}x{info['height']}", "-i", str(raw),
+                    *rotation_filter(info),
                     "-frames:v", "1", "-update", "1", str(png),
                 ]
                 subprocess.run(command, check=True)

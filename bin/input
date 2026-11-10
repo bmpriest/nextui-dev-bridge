@@ -8,9 +8,13 @@ PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
 # H700, TRIMUI Player1 on the Brick; RetroArch as SDL joypad 0), so a uinput pad
 # is invisible to the menu and lands on an unmapped player 2 in games.
 # spruce-input writes into the built-in pad's node with Spruce's sendevent.
+# On the A30 RetroArch reads MIYOO Pad1, which spruce's joypad daemon makes
+# from the gpio-keys-polled keyboard, so spruce-input writes keyboard codes
+# into that keyboard and the daemon carries them on like real presses.
 # Other Spruce models keep the existing virtual pad.
-if [ "$PLATFORM" = spruce ] && [ -x "$SDCARD_PATH/spruce/bin64/sendevent" ] &&
-	grep -qxE 'ANBERNIC-keys|TRIMUI Player1' /sys/class/input/event*/device/name 2>/dev/null; then
+if [ "$PLATFORM" = spruce ] &&
+	{ [ -x "$SDCARD_PATH/spruce/bin64/sendevent" ] || [ -x "$SDCARD_PATH/spruce/bin/sendevent" ]; } &&
+	grep -qxE 'ANBERNIC-keys|TRIMUI Player1|MIYOO Pad1' /sys/class/input/event*/device/name 2>/dev/null; then
 	exec "$BIN_DIR/spruce-input" "$@"
 fi
 
