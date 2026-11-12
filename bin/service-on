@@ -43,6 +43,7 @@ main() {
 		if system_sftp_available; then
 			"$BIN_DIR/input-on"
 			rm -f "$PORT_FILE"
+			touch "$STATE/system-ssh"
 			log "using existing system SSH/SFTP on port $SSH_PORT"
 			if [ -f "$STATE/beacon-enabled" ] && [ ! -f "$STATE/beacon.pid" ]; then
 				"$BIN_DIR/beacon.sh" >> "$LOG" 2>&1 &
@@ -58,7 +59,7 @@ main() {
 		fi
 		log "system SSH on port $SSH_PORT has no usable SFTP; using bundled SSH/SFTP on port $selected_port"
 	fi
-	rm -f "$PORT_FILE"
+	rm -f "$PORT_FILE" "$STATE/system-ssh"
 
 	arch=$(arch_dir)
 	chmod +x "$BIN_DIR/$arch"/* "$BIN_DIR/shell-wrapper.sh" \

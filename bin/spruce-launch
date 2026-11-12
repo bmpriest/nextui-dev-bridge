@@ -43,7 +43,11 @@ beacon_running() {
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
     [ -e "/proc/$pid" ]
 }
-enabled() { input_running || bundled_ssh_running; }
+# On spruce's own SSH, service-on leaves system-ssh: input_running alone is not
+# enough, as the Miyoo Mini needs no uinput pad (and may have no uinput).
+system_ssh_enabled() { [ -f "$STATE/system-ssh" ] && ssh_port_is_listening; }
+direct_input_ready() { spruce_direct_input && "$BIN_DIR/spruce-input" status >/dev/null 2>&1; }
+enabled() { input_running || bundled_ssh_running || system_ssh_enabled; }
 toggle_beacon() {
     if [ -f "$STATE/beacon-enabled" ]; then
         rm -f "$STATE/beacon-enabled"
@@ -64,7 +68,7 @@ build_menu() {
         *) ssh=Off ;;
     esac
     if sftp_available; then sftp=Ready; else sftp=Unavailable; fi
-    if input_running; then input=Ready; else input=Off; fi
+    if input_running || direct_input_ready; then input=Ready; else input=Off; fi
     if [ -f "$STATE/beacon-enabled" ]; then
         if beacon_running; then beacon=Broadcasting; else beacon='Enabled (idle)'; fi
     else beacon=Off; fi

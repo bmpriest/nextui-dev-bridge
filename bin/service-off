@@ -61,7 +61,7 @@ main() {
 		umount /etc/passwd 2>/dev/null
 	fi
 	rm -f "$PASSWD_MARKER"
-	rm -f "$PORT_FILE"
+	rm -f "$PORT_FILE" "$STATE/system-ssh"
 
 	log "stopped"
 	return 0

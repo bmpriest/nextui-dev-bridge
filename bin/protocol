@@ -270,6 +270,11 @@ screen_capture() {
 		grep -qx 'MIYOO Pad1' /sys/class/input/event*/device/name 2>/dev/null; then
 		printf 'rotate=90\n'
 	fi
+	# The Miyoo Mini family (SigmaStar SSD202: Mini Plus, Mini Flip) mounts
+	# its panel upside down: the framebuffer holds the picture turned 180.
+	if grep -q SStar /proc/cpuinfo 2>/dev/null; then
+		printf 'rotate=180\n'
+	fi
 }
 
 perf_sample() {
@@ -306,17 +311,23 @@ quit_game() {
 	printf 'ok=quit\n'
 }
 
+# Presses work through the uinput pad's socket, or straight into the built-in
+# pad on Spruce (bin/input).
+input_ready() {
+	[ -S /tmp/DevBridge-input.sock ] && return 0
+	spruce_direct_input && "$BIN_DIR/spruce-input" status >/dev/null 2>&1
+}
 command=$(printf '%s' "${1:-hello}" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')
 [ $# -eq 0 ] || shift
 case "$command" in
 	hello)
 		printf 'DEVBRIDGE/1\nprotocol=1\nplatform=%s\ninput=%s\n' \
-			"$PLATFORM" "$([ -S /tmp/DevBridge-input.sock ] && echo yes || echo no)"
+			"$PLATFORM" "$(input_ready && echo yes || echo no)"
 		;;
 	status)
 		printf 'platform=%s\nforeground=%s\ninput=%s\nrequest=%s\n' \
 			"$PLATFORM" "$(foreground)" \
-			"$([ -S /tmp/DevBridge-input.sock ] && echo ready || echo unavailable)" \
+			"$(input_ready && echo ready || echo unavailable)" \
 			"$([ -f "$REQUEST_FILE" ] && echo pending || echo none)"
 		;;
 	buttons) printf '%s\n' 'up down left right a b x y l1 r1 l2 r2 l3 r3 select start menu' ;;

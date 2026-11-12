@@ -12,9 +12,8 @@ PAK_DIR=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
 # from the gpio-keys-polled keyboard, so spruce-input writes keyboard codes
 # into that keyboard and the daemon carries them on like real presses.
 # Other Spruce models keep the existing virtual pad.
-if [ "$PLATFORM" = spruce ] &&
-	{ [ -x "$SDCARD_PATH/spruce/bin64/sendevent" ] || [ -x "$SDCARD_PATH/spruce/bin/sendevent" ]; } &&
-	grep -qxE 'ANBERNIC-keys|TRIMUI Player1|MIYOO Pad1' /sys/class/input/event*/device/name 2>/dev/null; then
+# The Miyoo Mini family has no named pad; spruce-input writes to its event0.
+if spruce_direct_input; then
 	exec "$BIN_DIR/spruce-input" "$@"
 fi
 
