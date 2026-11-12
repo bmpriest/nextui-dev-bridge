@@ -74,9 +74,12 @@ def verify_options(extras):
 def rotation_filter(info: dict) -> list[str]:
     """ffmpeg arguments that turn a portrait-mounted panel's frame upright.
     The device reports rotate=90 when its framebuffer holds the landscape
-    picture turned a quarter left (the Miyoo A30)."""
+    picture turned a quarter left (the Miyoo A30), and rotate=180 when the
+    panel is mounted upside down (the Miyoo Mini family)."""
     if info.get("rotate") == "90":
         return ["-vf", "transpose=1"]
+    if info.get("rotate") == "180":
+        return ["-vf", "hflip,vflip"]
     return []
 
 
@@ -108,7 +111,16 @@ class SSHTransport:
         root = Path(self.temp.name)
         self.askpass = root / "askpass.sh"
         password = os.environ.get(args.password_env, DEFAULT_PASSWORD)
-        self.askpass.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(password) + "\n")
+        # ssh passes its prompt ("USER@HOST's password: "): a device logged in
+        # as another user (--connect USER@ADDRESS) takes $PASSWORD_ENV_USER
+        # when that is set, so one run can mix firmwares' accounts.
+        self.askpass.write_text(
+            "#!/bin/sh\n"
+            "u=${1%%@*}\n"
+            "case $u in *[!A-Za-z0-9_]*|'') u= ;; esac\n"
+            f"[ -n \"$u\" ] && eval \"p=\\${{{args.password_env}_$u:-}}\" && [ -n \"$p\" ] && "
+            "{ printf '%s\\n' \"$p\"; exit 0; }\n"
+            "printf '%s\\n' " + shlex.quote(password) + "\n")
         self.askpass.chmod(0o700)
         self.config = root / "ssh_config"
         lines = [
@@ -165,7 +177,7 @@ class SSHTransport:
         else:
             argv = [
                 "ssh", *self.options(device.port),
-                f"{self.args.user}@{device.address}",
+                f"{device.user or self.args.user}@{device.address}",
                 "sh", "-lc", shlex.quote(command),
             ]
             environment = self.environment()
@@ -202,7 +214,7 @@ class SSHTransport:
         else:
             argv = [
                 "scp", *self.options(device.port, scp=True),
-                f"{self.args.user}@{device.address}:{remote_path}", str(local_path),
+                f"{device.user or self.args.user}@{device.address}:{remote_path}", str(local_path),
             ]
             environment = self.environment()
             start_new_session = self.uses_password()
@@ -221,8 +233,9 @@ class SSHTransport:
 
 class Device:
     def __init__(self, address: str, alias: str, port: int | None, platform: str,
-                 transport: str = "ssh"):
+                 transport: str = "ssh", user: str | None = None):
         self.address = address
+        self.user = user
         self.alias = alias
         self.port = port
         self.platform = platform
@@ -341,10 +354,14 @@ class Runner:
 
     def connect(self, address: str, alias: str | None = None, port: int | None = None):
         port = port or self.args.port
+        # USER@ADDRESS logs in to this device as USER instead of --user.
+        user, at, host = address.rpartition("@")
+        if at:
+            address = host
         alias = alias or address.replace(".", "-")
         if alias in self.devices:
             raise ProtocolError(f"alias already connected: {alias}")
-        device = Device(address, alias, port, self.args.platform)
+        device = Device(address, alias, port, self.args.platform, user=user or None)
         device.platform = self.locate_platform(device)
         result = self.protocol(device, "hello")
         if not has_protocol_marker(result.stdout):
@@ -987,7 +1004,7 @@ def parser():
         help="minimum interval between protocol command starts per device (default: 100)",
     )
     result.add_argument("--session-root", default="devbridge-sessions")
-    result.add_argument("--connect", action="append", default=[], metavar="ADDRESS[:ALIAS[:PORT]]")
+    result.add_argument("--connect", action="append", default=[], metavar="[USER@]ADDRESS[:ALIAS[:PORT]]")
     result.add_argument("--adb", action="append", default=[], metavar="SERIAL[=ALIAS]",
                         help="connect through a USB or network ADB device serial")
     result.add_argument("--interface", default="0.0.0.0")
